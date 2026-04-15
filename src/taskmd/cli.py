@@ -20,10 +20,10 @@ import shlex
 import re
 from datetime import datetime, timedelta
 
-from taskmd_lite.config import load_config, get_config_summary, init_default_config, get_config_file
-from taskmd_lite.repository import TaskRepository
-from taskmd_lite.service import TaskService
-from taskmd_lite.exceptions import TaskNotFoundError, TaskMDError
+from taskmd.config import load_config, get_config_summary, init_default_config, get_config_file
+from taskmd.repository import TaskRepository
+from taskmd.service import TaskService
+from taskmd.exceptions import TaskNotFoundError, TaskMDError
 
 
 # ─── Utility ─────────────────────────────────────────────────────────────────
@@ -379,7 +379,7 @@ def display_stats(stats):
 
 def display_doctor(config):
     """Display environment diagnostic info."""
-    from taskmd_lite.paths import get_config_dir, get_backup_dir, get_archive_file
+    from taskmd.paths import get_config_dir, get_backup_dir, get_archive_file
     import platform
 
     config_file = get_config_file()
@@ -402,7 +402,7 @@ def display_doctor(config):
     # Check task file health
     if config.task_file.exists():
         try:
-            from taskmd_lite.parser import parse_markdown
+            from taskmd.parser import parse_markdown
             content = config.task_file.read_text(encoding="utf-8")
             doc = parse_markdown(content)
             task_count = len(doc.tasks)

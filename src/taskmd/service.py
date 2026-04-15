@@ -16,9 +16,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from pathlib import Path
 
-from taskmd_lite.models import Task, TaskDocument
-from taskmd_lite.repository import TaskRepository
-from taskmd_lite.exceptions import TaskNotFoundError, ValidationError
+from taskmd.models import Task, TaskDocument
+from taskmd.repository import TaskRepository
+from taskmd.exceptions import TaskNotFoundError, ValidationError
 
 
 class TaskService:
@@ -399,7 +399,7 @@ class TaskService:
 
         # Append to archive file
         if archive_path is None:
-            from taskmd_lite.paths import get_archive_file
+            from taskmd.paths import get_archive_file
             archive_path = get_archive_file()
 
         archive_lines = []
@@ -417,7 +417,7 @@ class TaskService:
         date_str = self._today_str()
         archive_lines.append(f"## Archived on {date_str}")
         for task in done_tasks:
-            from taskmd_lite.writer import _format_task_line
+            from taskmd.writer import _format_task_line
             archive_lines.append(_format_task_line(task))
         archive_lines.append("")
 
@@ -473,7 +473,7 @@ class TaskService:
             max_id += 1
             new_id = f"t_{max_id:02d}"
             
-            from taskmd_lite.models import Task
+            from taskmd.models import Task
             task = Task(
                 name=line,
                 section="Migrated",
