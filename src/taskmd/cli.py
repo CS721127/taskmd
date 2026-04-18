@@ -18,7 +18,9 @@ import subprocess
 import os
 import shlex
 import re
+from pathlib import Path
 from datetime import datetime, timedelta
+from importlib.metadata import version as get_package_version, PackageNotFoundError
 
 from taskmd.config import load_config, get_config_summary, init_default_config, get_config_file
 from taskmd.repository import TaskRepository
@@ -114,6 +116,21 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
  \033[1mREPL\033[0m
    tm help                                   Show this help
    tm exit                                   Save and quit
+
+ \033[1mDashboard & UI\033[0m   (Phase 5 — requires: pip install 'taskmd[ui]')
+   tm dashboard                              Rich dashboard view
+   tm dashboard --live                       Live-reload dashboard (auto-refresh on save)
+   tm dashboard --progress                   Section progress bars only
+   tm dashboard --wide                       Force dual-column layout
+
+ \033[1mExport\033[0m   (Phase 8)
+   tm export csv [--output f.csv]            Export to CSV
+   tm export json [--output f.json]          Export to JSON
+   tm export html [--output board.html]      Export HTML kanban board
+   tm export ics [--output tasks.ics]        Export to iCalendar (requires 'taskmd[export]')
+   tm export report                          Print daily report
+   tm export report --week                   Weekly report to stdout
+   tm export report --week --output r.md     Save weekly report to file
 
 \033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
 """
@@ -244,6 +261,26 @@ def get_parser(interactive=False):
     p_migrate = subparsers.add_parser("migrate")
     p_migrate.add_argument("migrate_type", choices=["txt-to-md"])
 
+    # ─ dashboard (Phase 5) ─
+    p_dashboard = subparsers.add_parser("dashboard")
+    p_dashboard.add_argument("--live", action="store_true", help="Enable live reload mode")
+    p_dashboard.add_argument("--wide", action="store_true", help="Force dual-column layout")
+    p_dashboard.add_argument("--progress", action="store_true", help="Show section progress bars only")
+
+    # ─ export (Phase 8) ─
+    p_export = subparsers.add_parser("export")
+    p_export.add_argument(
+        "format",
+        choices=["csv", "json", "ics", "html", "report"],
+        help="Export format",
+    )
+    p_export.add_argument("--output", "-o", default=None, help="Output file path")
+    p_export.add_argument("--pretty", action="store_true", default=True, help="Pretty-print JSON")
+    p_export.add_argument("--only-pending", action="store_true", help="Only export pending tasks")
+    p_export.add_argument("--theme", choices=["light", "dark"], default="light", help="HTML theme")
+    p_export.add_argument("--week", action="store_true", help="Generate weekly report (for 'report' format)")
+    p_export.add_argument("--week-offset", type=int, default=0, help="Week offset (0=this week, 1=last week)")
+
     # ─ REPL ─
     subparsers.add_parser("help")
     subparsers.add_parser("exit")
@@ -367,14 +404,31 @@ def display_stats(stats):
     print("\n\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
     print("\033[1m  📊 TASK STATISTICS\033[0m")
     print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
-    print(f"  Total tasks     : {stats['total']}")
-    print(f"  ✅ Completed    : \033[92m{stats['done']}\033[0m")
-    print(f"  🔄 In Progress  : \033[93m{stats['in_progress']}\033[0m")
-    print(f"  📝 Todo         : {stats['todo']}")
-    print(f"  ⚠️  Overdue      : \033[91m{stats['overdue']}\033[0m")
-    print(f"  📅 Due Today    : \033[91m{stats['due_today']}\033[0m")
-    print(f"  📈 Completion   : \033[96m{stats['completion_rate']}\033[0m")
+    print(f"  Total tasks       : {stats['total']}")
+    print(f"  ✅ Completed       : \033[92m{stats['done']}\033[0m")
+    print(f"  🔄 In Progress     : \033[93m{stats['in_progress']}\033[0m")
+    print(f"  📝 Todo            : {stats['todo']}")
+    print(f"  ⚠️  Overdue         : \033[91m{stats['overdue']}\033[0m")
+    print(f"  📅 Due Today       : \033[91m{stats['due_today']}\033[0m")
+    completed_today = stats.get("completed_today", 0)
+    if completed_today:
+        print(f"  🎉 Done Today      : \033[92m{completed_today}\033[0m")
+    urgent = stats.get("urgent", 0)
+    if urgent:
+        print(f"  🚨 Urgent          : \033[91m{urgent}\033[0m")
+    in_attention = stats.get("in_attention", 0)
+    if in_attention:
+        print(f"  💎 In Attention    : \033[96m{in_attention}\033[0m")
+    print(f"  📈 Completion      : \033[96m{stats['completion_rate']}\033[0m")
     print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+
+
+def _get_package_version(package_name: str) -> str:
+    """Safely get package version using importlib.metadata."""
+    try:
+        return get_package_version(package_name)
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def display_doctor(config):
@@ -398,6 +452,23 @@ def display_doctor(config):
     print(f"  Editor       : {config.editor}")
     print(f"  Timezone     : {config.timezone}")
     print(f"  Theme        : {config.theme}")
+
+    # Optional dependency checks
+    try:
+        import rich  # type: ignore
+        print(f"  rich         : ✅ {_get_package_version('rich')}")
+    except ImportError:
+        print("  rich         : ⚠️  not installed  (pip install 'taskmd[ui]')")
+    try:
+        import watchdog  # type: ignore
+        print(f"  watchdog     : ✅ {_get_package_version('watchdog')}")
+    except ImportError:
+        print("  watchdog     : ⚠️  not installed  (pip install 'taskmd[ui]')")
+    try:
+        import icalendar  # type: ignore
+        print(f"  icalendar    : ✅ {_get_package_version('icalendar')}")
+    except ImportError:
+        print("  icalendar    : ⚠️  not installed  (pip install 'taskmd[export]')")
 
     # Check task file health
     if config.task_file.exists():
@@ -612,10 +683,150 @@ def handle_args(args, service, config, parser):
         elif args.command == "exit":
             sys.exit(0)
 
+        # ── Phase 5: Dashboard ────────────────────────────────────────────
+        elif args.command == "dashboard":
+            _handle_dashboard(args, service, config)
+
+        # ── Phase 8: Export ───────────────────────────────────────────────
+        elif args.command == "export":
+            _handle_export(args, service, config)
+
     except TaskNotFoundError as e:
         print(f"\033[91m[!] {e}\033[0m")
     except TaskMDError as e:
         print(f"\033[91m[!] {e}\033[0m")
+
+
+# ─── Phase 5: Dashboard Handler ──────────────────────────────────────────────
+
+def _handle_dashboard(args, service, config):
+    """Handle the `tm dashboard` command."""
+    from taskmd.ui.dashboard import get_dashboard, RICH_AVAILABLE
+
+    tasks = service.get_all_tasks()
+    stats = service.get_stats()
+    dashboard = get_dashboard()
+
+    if hasattr(args, "progress") and args.progress:
+        dashboard.render_section_progress(tasks)
+        return
+
+    if hasattr(args, "live") and args.live:
+        # Live reload mode
+        from taskmd.ui.live import run_live_dashboard, WATCHDOG_AVAILABLE
+
+        if not RICH_AVAILABLE:
+            print("\033[93m[WARN] rich not installed. Using ANSI fallback.\033[0m")
+
+        def render_fn():
+            nonlocal tasks, stats
+            tasks = service.get_all_tasks()
+            stats = service.get_stats()
+            if RICH_AVAILABLE:
+                from rich.console import Group  # type: ignore
+                from io import StringIO
+                # Build renderable layout
+                from taskmd.ui.dashboard import RichDashboard
+                d = RichDashboard()
+                # Return a simple renderable for live mode
+                from rich.panel import Panel  # type: ignore
+                from rich.text import Text  # type: ignore
+                from taskmd.ui.dashboard import _group_by_section, _section_progress, _make_progress_bar, _format_task_row_rich
+                from rich.console import Console  # type: ignore
+                from io import StringIO
+
+                buf = Console(file=StringIO(), highlight=False)
+                d.console = buf
+                d.render_full(tasks, stats)
+                return Panel(buf.file.getvalue(), title="[bold cyan]TaskMD Live[/bold cyan]")
+            else:
+                dashboard.render_full(tasks, stats)
+
+        if RICH_AVAILABLE:
+            from taskmd.ui.live import run_live_dashboard
+            run_live_dashboard(config.task_file, render_fn)
+        else:
+            import os, time
+            print(f"Watching: {config.task_file}  (Ctrl+C to exit)")
+            last_mtime = config.task_file.stat().st_mtime if config.task_file.exists() else 0
+            try:
+                dashboard.render_full(tasks, stats)
+                while True:
+                    time.sleep(0.5)
+                    try:
+                        mtime = config.task_file.stat().st_mtime
+                    except FileNotFoundError:
+                        continue
+                    if mtime != last_mtime:
+                        last_mtime = mtime
+                        os.system("clear" if os.name != "nt" else "cls")
+                        tasks = service.get_all_tasks()
+                        stats = service.get_stats()
+                        dashboard.render_full(tasks, stats)
+            except KeyboardInterrupt:
+                print("\nDashboard closed.")
+    else:
+        dashboard.render_full(tasks, stats)
+
+
+# ─── Phase 8: Export Handler ──────────────────────────────────────────────────
+
+def _handle_export(args, service, config):
+    """Handle the `tm export <format>` command."""
+    tasks = service.get_all_tasks()
+    fmt = args.format
+    output = Path(args.output) if args.output else None
+    only_pending = getattr(args, "only_pending", False)
+
+    if fmt == "csv":
+        from taskmd.exporters.csv_exporter import export_csv
+        default_out = output or Path("tasks_export.csv")
+        export_csv(tasks, output_path=default_out, only_pending=only_pending)
+        print(f"\033[92m[OK] CSV exported → {default_out}\033[0m")
+
+    elif fmt == "json":
+        from taskmd.exporters.json_exporter import export_json
+        default_out = output or Path("tasks_export.json")
+        pretty = getattr(args, "pretty", True)
+        export_json(tasks, output_path=default_out, pretty=pretty, only_pending=only_pending)
+        print(f"\033[92m[OK] JSON exported → {default_out}\033[0m")
+
+    elif fmt == "ics":
+        try:
+            from taskmd.exporters.ics_exporter import export_ics
+        except ImportError as e:
+            print(f"\033[91m[!] {e}\033[0m")
+            return
+        default_out = output or Path("tasks.ics")
+        export_ics(tasks, output_path=default_out, only_pending=only_pending)
+        print(f"\033[92m[OK] ICS exported → {default_out}\033[0m")
+        print("\033[90m  Import this file into Google Calendar, Apple Calendar, or Outlook.\033[0m")
+
+    elif fmt == "html":
+        from taskmd.exporters.html_exporter import export_html
+        default_out = output or Path("tasks_board.html")
+        theme = getattr(args, "theme", "light")
+        export_html(tasks, output_path=default_out, theme=theme)
+        print(f"\033[92m[OK] HTML board exported → {default_out}\033[0m")
+        print("\033[90m  Open in any browser. No server required.\033[0m")
+
+    elif fmt == "report":
+        from taskmd.exporters.report import generate_weekly_report, generate_daily_report
+        week_offset = getattr(args, "week_offset", 0)
+        do_week = getattr(args, "week", False)
+
+        if do_week or week_offset > 0:
+            default_out = output or Path(f"report_week.md")
+            content = generate_weekly_report(tasks, week_offset=week_offset, output_path=default_out)
+            print(f"\033[92m[OK] Weekly report exported → {default_out}\033[0m")
+        else:
+            # Default: print daily report to stdout, optionally save
+            from datetime import date
+            content = generate_daily_report(tasks, target_date=date.today(), output_path=output)
+            if output:
+                print(f"\033[92m[OK] Daily report exported → {output}\033[0m")
+            else:
+                print(content)
 
 
 # ─── REPL ─────────────────────────────────────────────────────────────────────

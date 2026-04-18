@@ -103,13 +103,21 @@ class TaskService:
         return doc.tasks
 
     def get_today(self) -> List[Task]:
-        """Return tasks due today (incomplete only)."""
+        """Return tasks due today or in attention window (start <= today < due), incomplete only."""
         today = self._today_str()
         tasks = self.get_all_tasks()
-        return [
-            t for t in tasks
-            if t.due == today and t.status != "[x]"
-        ]
+        result = []
+        for t in tasks:
+            if t.status == "[x]":
+                continue
+            if t.due == today:
+                result.append(t)
+                continue
+            # In attention window: start_date <= today and no due, or due is in the future
+            if t.start and t.start <= today:
+                if not t.due or t.due > today:
+                    result.append(t)
+        return result
 
     def get_next(self, days: int = 7) -> List[Task]:
         """Return incomplete tasks due within the next N days."""
@@ -150,7 +158,27 @@ class TaskService:
         in_progress = sum(1 for t in tasks if t.status == "[-]")
         todo = sum(1 for t in tasks if t.status == "[ ]")
         overdue = len(self.get_overdue())
-        today_count = len(self.get_today())
+        today_str = self._today_str()
+        today_count = sum(1 for t in tasks if t.due == today_str and t.status != "[x]")
+
+        # Completed today (by done_ts date)
+        completed_today = sum(
+            1 for t in tasks
+            if t.status == "[x]" and t.done_ts and t.done_ts[:10] == today_str
+        )
+
+        # Urgency breakdown
+        from taskmd.ui.heatmap import get_urgency_level, URGENCY_OVERDUE, URGENCY_DUE_TODAY, URGENCY_DUE_SOON, URGENCY_IN_ATTENTION
+        urgent = sum(
+            1 for t in tasks
+            if t.status != "[x]" and get_urgency_level(t) in (
+                URGENCY_OVERDUE, URGENCY_DUE_TODAY, URGENCY_DUE_SOON
+            )
+        )
+        in_attention = sum(
+            1 for t in tasks
+            if t.status != "[x]" and get_urgency_level(t) == URGENCY_IN_ATTENTION
+        )
 
         return {
             "total": total,
@@ -159,6 +187,9 @@ class TaskService:
             "todo": todo,
             "overdue": overdue,
             "due_today": today_count,
+            "completed_today": completed_today,
+            "urgent": urgent,
+            "in_attention": in_attention,
             "completion_rate": f"{done / total * 100:.1f}%" if total > 0 else "0.0%",
         }
 
