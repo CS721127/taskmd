@@ -9,6 +9,5 @@ htmlcov/
 build/
 dist/
 *.egg-info/
-TODOs.md
 *.ics
 *.html
