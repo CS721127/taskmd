@@ -429,3 +429,8 @@ TaskMD 的路线图（Roadmap）应遵循：
 
 ### 验收标准
 - 外部用户可以安装、理解、试用、反馈与贡献
+
+## Phase 24 BONGOCAT Style切入
+
+###目标
+让项目以更加interactive的形式展示在电脑端，ipad端，以及手机端；类似于BONGOCAT的感觉
