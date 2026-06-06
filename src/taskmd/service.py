@@ -412,6 +412,12 @@ class TaskService:
         self.repo.save(doc)
         return removed
 
+    def clear_all(self):
+        """Remove all tasks from the document."""
+        doc = self.repo.load()
+        doc.tasks = []
+        self.repo.save(doc)
+
     def edit_name(self, task_id: str, new_name: str):
         """Edit a task's name."""
         self.set_metadata(task_id, "name", new_name)
@@ -543,57 +549,150 @@ class TaskService:
         if no_id:
             errors.append(f"{len(no_id)} task(s) have no ID assigned")
 
-        # Check for invalid date formats
+        # Check for invalid date formats and logic
         import re
-        date_re = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+        from datetime import datetime
+        # Allow YYYY-MM-DD or YYYY-MM-DD HH:MM
+        date_re = re.compile(r'^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$')
+        today = datetime.now()
+
         for task in doc.tasks:
+            # Date format checks
             if task.due and not date_re.match(task.due):
                 errors.append(f"Task {task.id}: invalid due date format '{task.due}'")
             if task.start and not date_re.match(task.start):
                 errors.append(f"Task {task.id}: invalid start date format '{task.start}'")
+            
+            # Logic: start <= due
+            if task.start and task.due and date_re.match(task.start) and date_re.match(task.due):
+                try:
+                    s_fmt = "%Y-%m-%d %H:%M" if " " in task.start else "%Y-%m-%d"
+                    d_fmt = "%Y-%m-%d %H:%M" if " " in task.due else "%Y-%m-%d"
+                    s_dt = datetime.strptime(task.start, s_fmt)
+                    d_dt = datetime.strptime(task.due, d_fmt)
+                    if s_dt > d_dt:
+                        errors.append(f"Task {task.id}: start date ({task.start}) is after due date ({task.due})")
+                except ValueError:
+                    pass
 
-        # Check for empty task names
-        for task in doc.tasks:
+            # Logic: done_ts not in future
+            if task.done_ts:
+                try:
+                    done_dt = datetime.fromisoformat(task.done_ts)
+                    if done_dt > today:
+                        errors.append(f"Task {task.id}: done timestamp is in the future")
+                except ValueError:
+                    errors.append(f"Task {task.id}: invalid done timestamp format '{task.done_ts}'")
+
+            # Priority range
+            if task.pri is not None and (task.pri < 0 or task.pri > 5):
+                errors.append(f"Task {task.id}: priority {task.pri} is outside valid range (0-5)")
+
+            # Recur validity
+            if task.recur:
+                from taskmd.recurrence import parse_recur
+                if not parse_recur(task.recur):
+                    errors.append(f"Task {task.id}: invalid recur format '{task.recur}'")
+
+            # Empty names
             if not task.name or not task.name.strip():
                 errors.append(f"Task {task.id}: empty task name")
 
+        # Orphan sections (Check if all sections from headers actually have tasks)
+        # Assuming sections are in doc.raw_lines as section objects or derived from tasks
+        # The parser preserves section/sub for each Task object.
+        # If a header has no tasks follow it, the parser might not create a Task object for it.
+        # But we can check doc.raw_lines.
+        sections_with_tasks = set((t.section, t.sub) for t in doc.tasks)
+        # This is a bit complex as raw_lines contains the headers.
+        # For now, focus on task-level validation.
+
         return errors
 
-    # ─── Daily Reset ─────────────────────────────────────────────────────
+    # ─── Recurring Tasks ──────────────────────────────────────────────────
 
-    def check_daily_reset(self):
-        """Check if daily tasks need to be reset for a new day.
+    def check_recurring_tasks(self):
+        """Check if any tasks need to be reset/regenerated for a new cycle.
 
-        Returns tuple of (is_new_day: bool, daily_task_count: int).
+        Returns tuple of (needs_action: bool, task_count: int).
         """
         doc = self.repo.load()
         self._repair_ids(doc)
 
+        today_dt = datetime.now().date()
         today_str = self._today_str()
+        
         if doc.last_run == today_str:
             return False, 0
+        
+        # Parse last_run
+        try:
+            last_run_dt = datetime.strptime(doc.last_run, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            # If never run or invalid, assume yesterday so it triggers today
+            last_run_dt = today_dt - timedelta(days=1)
 
-        daily_tasks = [t for t in doc.tasks if t.section.lower() == "daily"]
-        is_new_day = True
-        count = len(daily_tasks)
+        from taskmd.recurrence import parse_recur, should_trigger
+        
+        tasks_to_reset = []
+        for task in doc.tasks:
+            # 1. Traditional 'Daily' section reset
+            if task.section.lower() == "daily" and task.status != "[ ]":
+                tasks_to_reset.append(task)
+                continue
+            
+            # 2. Modern 'recur' metadata reset
+            if task.recur:
+                spec = parse_recur(task.recur)
+                if spec and should_trigger(spec, last_run_dt, today_dt):
+                    if task.status != "[ ]":
+                        tasks_to_reset.append(task)
 
-        return is_new_day, count
+        is_needed = len(tasks_to_reset) > 0 or doc.last_run != today_str
+        return is_needed, len(tasks_to_reset)
 
-    def reset_daily_tasks(self):
-        """Reset all 'Daily' section tasks to [ ] and update last_run."""
+    def apply_recurring_tasks(self):
+        """Perform reset on all tasks that hit their recurring cycle."""
         doc = self.repo.load()
+        today_dt = datetime.now().date()
         today_str = self._today_str()
 
+        try:
+            last_run_dt = datetime.strptime(doc.last_run, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            last_run_dt = today_dt - timedelta(days=1)
+
+        from taskmd.recurrence import parse_recur, should_trigger, get_next_due
+        
         for task in doc.tasks:
+            triggered = False
+            # Check Daily section
             if task.section.lower() == "daily":
+                triggered = True
+            # Check recur metadata
+            elif task.recur:
+                spec = parse_recur(task.recur)
+                if spec and should_trigger(spec, last_run_dt, today_dt):
+                    triggered = True
+                    # Optionally update due date if it has one
+                    if task.due:
+                        try:
+                            current_due = datetime.strptime(task.due[:10], "%Y-%m-%d").date()
+                            next_due = get_next_due(spec, current_due)
+                            task.due = next_due.isoformat()
+                        except ValueError:
+                            pass
+
+            if triggered:
                 task.status = "[ ]"
                 task.done_ts = None
+                task.updated = self._now_iso()
 
         doc.last_run = today_str
         self.repo.save(doc)
 
-    def skip_daily_reset(self):
-        """Skip the daily reset but update last_run."""
+    def skip_recurring_reset(self):
+        """Skip the cycle reset but update last_run to today."""
         doc = self.repo.load()
         doc.last_run = self._today_str()
         self.repo.save(doc)

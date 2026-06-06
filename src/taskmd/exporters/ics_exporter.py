@@ -72,15 +72,26 @@ def export_ics(
 
     for task in due_tasks:
         try:
-            due_date = datetime.strptime(task.due, "%Y-%m-%d").date()
+            if " " in task.due:
+                due_dt = datetime.strptime(task.due, "%Y-%m-%d %H:%M")
+                is_all_day = False
+            else:
+                due_dt = datetime.strptime(task.due, "%Y-%m-%d").date()
+                is_all_day = True
         except ValueError:
             continue
 
         event = Event()
         event.add("uid", _make_uid(task))
         event.add("summary", task.name)
-        event.add("dtstart", due_date)
-        event.add("dtend", due_date)  # All-day event
+        event.add("dtstart", due_dt)
+        if is_all_day:
+            event.add("dtend", due_dt)  # All-day event
+        else:
+            # For timed events, default duration 1 hour or just use same time?
+            # iCal usually needs dtend.
+            from datetime import timedelta
+            event.add("dtend", due_dt + timedelta(hours=1))
 
         # Description with full task metadata
         desc_parts = [f"TaskMD ID: {task.id}"]

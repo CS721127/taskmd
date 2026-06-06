@@ -88,7 +88,10 @@ def _format_task_row_rich(task: Task, show_section: bool = False) -> "Text":
     # Build the text
     line = Text()
     line.append(f"  {icon} ", style="dim")
-    line.append(f"[{task.id}] ", style="bright_blue")
+    
+    # Use short ID: t_01 -> 01
+    sid = task.id[2:] if task.id.startswith("t_") else task.id
+    line.append(f"[{sid}] ", style="bright_blue")
     if pri_str:
         line.append(f"{pri_str:<5} ", style="bold red")
     line.append(f"{status_sym} ", style=style)
@@ -216,26 +219,32 @@ class RichDashboard:
 
     def _render_dual_column(self, groups: Dict, all_tasks: List[Task]):
         """Render tasks in dual-column layout for wide terminals."""
-        # Left column: task tree, Right column: today + stats
-        left_lines = []
+        # Main Layout Table
+        layout_table = Table.grid(expand=True)
+        layout_table.add_column(ratio=2) # Tasks
+        layout_table.add_column(ratio=1) # Today / Overdue
+
+        # Left column: task tree
+        left_group = []
         for section_name, subs in groups.items():
             all_sec_tasks = [t for sub_tasks in subs.values() for t in sub_tasks]
             done, total = _section_progress(all_sec_tasks)
             bar = _make_progress_bar(done, total)
 
-            left_lines.append(
-                f"[bold white]{section_name}[/bold white]  "
-                f"[{'green' if done == total else 'yellow'}]{bar}[/]"
-            )
+            left_group.append(Text(""))
+            header = Text()
+            header.append(f"{section_name} ", style="bold white")
+            header.append(bar, style="green" if done == total else "yellow")
+            left_group.append(header)
 
             for sub_name, sub_tasks in subs.items():
                 sub_done, sub_total = _section_progress(sub_tasks)
-                left_lines.append(
-                    f"  [dim]── {sub_name}[/dim]  "
-                    f"[dim]{_make_progress_bar(sub_done, sub_total, 6)}[/dim]"
-                )
+                left_group.append(Text(
+                    f"  ── {sub_name}  {_make_progress_bar(sub_done, sub_total, 6)}",
+                    style="dim"
+                ))
                 for task in sub_tasks:
-                    left_lines.append(_format_task_row_rich(task))
+                    left_group.append(_format_task_row_rich(task))
 
         # Right column: today's tasks
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -248,47 +257,30 @@ class RichDashboard:
             if t.due and t.due < today_str and t.status != "[x]"
         ]
 
-        right_lines = [Text("📅 Today", style="bold yellow")]
+        right_group = []
+        right_group.append(Text("📅 Today", style="bold yellow"))
         if today_tasks:
             for t in today_tasks:
-                right_lines.append(_format_task_row_rich(t))
+                right_group.append(_format_task_row_rich(t))
         else:
-            right_lines.append(Text("  (none)", style="dim"))
+            right_group.append(Text("  (none)", style="dim"))
 
-        right_lines.append(Text(""))
-        right_lines.append(Text("🔴 Overdue", style="bold red"))
+        right_group.append(Text(""))
+        right_group.append(Text("🔴 Overdue", style="bold red"))
         if overdue_tasks:
-            for t in overdue_tasks[:5]:
-                right_lines.append(_format_task_row_rich(t))
-            if len(overdue_tasks) > 5:
-                right_lines.append(Text(f"  ...and {len(overdue_tasks) - 5} more", style="dim"))
+            for t in overdue_tasks[:8]: # Show more in dual column
+                right_group.append(_format_task_row_rich(t))
+            if len(overdue_tasks) > 8:
+                right_group.append(Text(f"  ...and {len(overdue_tasks) - 8} more", style="dim"))
         else:
-            right_lines.append(Text("  (none)", style="dim green"))
+            right_group.append(Text("  (none)", style="dim green"))
 
-        from rich.live import Live
-        from io import StringIO
+        from rich.console import Group
+        left_panel = Panel(Group(*left_group), title="[bold]Tasks[/bold]", border_style="blue")
+        right_panel = Panel(Group(*right_group), title="[bold]Quick View[/bold]", border_style="cyan")
 
-        # Build left panel content
-        left_text = Text()
-        for item in left_lines:
-            if isinstance(item, Text):
-                left_text.append_text(item)
-                left_text.append("\n")
-            else:
-                left_text.append(item + "\n")
-
-        right_text = Text()
-        for item in right_lines:
-            if isinstance(item, Text):
-                right_text.append_text(item)
-                right_text.append("\n")
-            else:
-                right_text.append(str(item) + "\n")
-
-        left_panel = Panel(left_text, title="[bold]Tasks[/bold]", border_style="blue")
-        right_panel = Panel(right_text, title="[bold]Quick View[/bold]", border_style="cyan")
-
-        self.console.print(Columns([left_panel, right_panel]))
+        layout_table.add_row(left_panel, right_panel)
+        self.console.print(layout_table)
 
     def render_section_progress(self, tasks: List[Task]):
         """Render a progress bar for each section."""
@@ -371,8 +363,9 @@ class RichDashboard:
                 style="magenta"
             )
 
+            sid = task.id[2:] if task.id.startswith("t_") else task.id
             row_data = [
-                f"{icon} {task.id}",
+                f"{icon} {sid}",
                 pri_text,
                 status_sym,
                 Text(task.name, style=style),
@@ -431,8 +424,9 @@ class AnsiFallbackDashboard:
                     pri = ("★" * task.pri) if task.pri else ""
                     due = f"  📅{task.due}" if task.due else ""
                     tags = f"  [{','.join(task.tags)}]" if task.tags else ""
+                    sid = task.id[2:] if task.id.startswith("t_") else task.id
                     print(
-                        f"      {icon} \033[94m[{task.id}]\033[0m "
+                        f"      {icon} \033[94m[{sid}]\033[0m "
                         f"{color}{status_sym} {task.name}\033[0m"
                         f"\033[33m{pri}\033[0m{due}{tags}"
                     )

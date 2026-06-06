@@ -20,8 +20,8 @@ import shlex
 import re
 from pathlib import Path
 from datetime import datetime, timedelta
-from importlib.metadata import version as get_package_version, PackageNotFoundError
 
+from taskmd import __version__
 from taskmd.config import load_config, get_config_summary, init_default_config, get_config_file
 from taskmd.repository import TaskRepository
 from taskmd.service import TaskService
@@ -30,12 +30,19 @@ from taskmd.exceptions import TaskNotFoundError, TaskMDError
 
 # ─── Utility ─────────────────────────────────────────────────────────────────
 
+def short_id(task_id: str) -> str:
+    """Convert internal ID to user-friendly short form: 't_01' -> '01'."""
+    if task_id and task_id.startswith("t_"):
+        return task_id[2:]
+    return task_id or "?"
+
+
 def get_time_left(due: str) -> str:
     """Format time remaining until due date."""
     if not due:
         return ""
     try:
-        due_date = datetime.strptime(due, "%Y-%m-%d")
+        due_date = datetime.strptime(due[:10], "%Y-%m-%d")
         delta = due_date.date() - datetime.now().date()
         if delta.days < 0:
             return "\033[91m(OVERDUE)\033[0m"
@@ -51,12 +58,33 @@ def get_time_left(due: str) -> str:
 
 
 def is_valid_date(date_str: str) -> bool:
-    """Check if a string is a valid YYYY-MM-DD date."""
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
+    """Check if a string is a valid YYYY-MM-DD or YYYY-MM-DD HH:MM date."""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M"):
+        try:
+            datetime.strptime(date_str, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def parse_flexible_date(date_str: str) -> str:
+    """Parse a flexible date input into YYYY-MM-DD (or YYYY-MM-DD HH:MM).
+
+    Supports: YYYY-MM-DD, YYYY-MM-DD HH:MM, today, tomorrow, yesterday,
+    mon-sun, next-mon through next-sun, next-week, 2-weeks, 3-weeks, +Nd.
+    Returns the original string if it's already a valid date.
+    """
+    stripped = date_str.strip()
+    # Already valid date?
+    if is_valid_date(stripped):
+        return stripped
+    # Use quick_capture date parser for shorthands
+    from taskmd.quick_capture import _parse_date_token
+    result = _parse_date_token(stripped)
+    if result:
+        return result
+    return stripped  # return as-is, caller can validate
 
 
 def format_task(t, show_section: bool = False) -> str:
@@ -68,7 +96,8 @@ def format_task(t, show_section: bool = False) -> str:
     time_left_str = f" {time_left}" if time_left else ""
     tags_str = f" \033[35m[{', '.join(t.tags)}]\033[0m" if t.tags else ""
     section_str = f" \033[90m({t.section}/{t.sub})\033[0m" if show_section else ""
-    return f"      \033[94m[{t.id}]\033[0m {pri_str} {color}{t.status}\033[0m {t.name}{time_left_str}{tags_str}{rem_info}{section_str}"
+    sid = short_id(t.id)
+    return f"      \033[94m[{sid}]\033[0m {pri_str} {color}{t.status}\033[0m {t.name}{time_left_str}{tags_str}{rem_info}{section_str}"
 
 
 # ─── Custom Argparse ─────────────────────────────────────────────────────────
@@ -117,20 +146,28 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm help                                   Show this help
    tm exit                                   Save and quit
 
+ \033[1mQuick Capture\033[0m   (Phase 7 — inline tokens)
+   tm add "Write report #work !3 @2026-04-25"
+   tm add "Buy milk #errand @tomorrow"
+   tm add "Review PR !2 @+3d /Work //Docs [check CI first]"
+     Tokens: #tag  !priority(1-5)  @due-date  ^start-date  /section  //sub  [note]
+     Dates:  @today @tomorrow @mon…@sun @+Nd YYYY-MM-DD
+
  \033[1mDashboard & UI\033[0m   (Phase 5 — requires: pip install 'taskmd[ui]')
    tm dashboard                              Rich dashboard view
    tm dashboard --live                       Live-reload dashboard (auto-refresh on save)
    tm dashboard --progress                   Section progress bars only
-   tm dashboard --wide                       Force dual-column layout
 
  \033[1mExport\033[0m   (Phase 8)
-   tm export csv [--output f.csv]            Export to CSV
-   tm export json [--output f.json]          Export to JSON
-   tm export html [--output board.html]      Export HTML kanban board
-   tm export ics [--output tasks.ics]        Export to iCalendar (requires 'taskmd[export]')
+   tm export csv    [--output f.csv]         Export to CSV
+   tm export json   [--output f.json]        Export to JSON
+   tm export html   [--output board.html]    Export HTML kanban board  [--theme light|dark]
+   tm export svg    [--output board.svg]     Export static SVG board   [--theme light|dark]
+   tm export png    [--output board.png]     Export PNG image          [--theme dark] [--scale 2.0]
+   tm export pdf    [--output report.pdf]    Export PDF report         [--month 2026-04]
+   tm export ics    [--output tasks.ics]     Export iCalendar          (requires 'taskmd[export]')
    tm export report                          Print daily report
-   tm export report --week                   Weekly report to stdout
-   tm export report --week --output r.md     Save weekly report to file
+   tm export report --week [--output r.md]   Weekly report
 
 \033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
 """
@@ -168,6 +205,7 @@ class TaskMDParser(argparse.ArgumentParser):
 
 def get_parser(interactive=False):
     parser = TaskMDParser(interactive=interactive, description="TaskMD Lite CLI")
+    parser.add_argument('-v', '--version', action='version', version=f'taskmd {__version__}')
     subparsers = parser.add_subparsers(dest="command")
 
     # ─ add ─
@@ -188,6 +226,9 @@ def get_parser(interactive=False):
 
     # ─ rm_done ─
     subparsers.add_parser("rm_done")
+
+    # ─ clear ─
+    subparsers.add_parser("clear")
 
     # ─ edit ─
     p_edit = subparsers.add_parser("edit")
@@ -271,15 +312,17 @@ def get_parser(interactive=False):
     p_export = subparsers.add_parser("export")
     p_export.add_argument(
         "format",
-        choices=["csv", "json", "ics", "html", "report"],
+        choices=["csv", "json", "ics", "html", "report", "pdf", "svg", "png"],
         help="Export format",
     )
     p_export.add_argument("--output", "-o", default=None, help="Output file path")
     p_export.add_argument("--pretty", action="store_true", default=True, help="Pretty-print JSON")
     p_export.add_argument("--only-pending", action="store_true", help="Only export pending tasks")
-    p_export.add_argument("--theme", choices=["light", "dark"], default="light", help="HTML theme")
-    p_export.add_argument("--week", action="store_true", help="Generate weekly report (for 'report' format)")
-    p_export.add_argument("--week-offset", type=int, default=0, help="Week offset (0=this week, 1=last week)")
+    p_export.add_argument("--theme", choices=["light", "dark"], default="light", help="Visual theme")
+    p_export.add_argument("--week", action="store_true", help="Generate weekly report")
+    p_export.add_argument("--week-offset", type=int, default=0, help="Week offset (0=this week)")
+    p_export.add_argument("--month", default=None, help="Filter by month YYYY-MM (pdf only)")
+    p_export.add_argument("--scale", type=float, default=2.0, help="PNG scale factor (default 2.0)")
 
     # ─ REPL ─
     subparsers.add_parser("help")
@@ -423,14 +466,6 @@ def display_stats(stats):
     print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
 
 
-def _get_package_version(package_name: str) -> str:
-    """Safely get package version using importlib.metadata."""
-    try:
-        return get_package_version(package_name)
-    except PackageNotFoundError:
-        return "unknown"
-
-
 def display_doctor(config):
     """Display environment diagnostic info."""
     from taskmd.paths import get_config_dir, get_backup_dir, get_archive_file
@@ -455,18 +490,18 @@ def display_doctor(config):
 
     # Optional dependency checks
     try:
-        import rich  # type: ignore
-        print(f"  rich         : ✅ {_get_package_version('rich')}")
+        import rich
+        print(f"  rich         : ✅ {rich.__version__}")
     except ImportError:
         print("  rich         : ⚠️  not installed  (pip install 'taskmd[ui]')")
     try:
-        import watchdog  # type: ignore
-        print(f"  watchdog     : ✅ {_get_package_version('watchdog')}")
+        import watchdog
+        print(f"  watchdog     : ✅ {watchdog.__version__}")
     except ImportError:
         print("  watchdog     : ⚠️  not installed  (pip install 'taskmd[ui]')")
     try:
-        import icalendar  # type: ignore
-        print(f"  icalendar    : ✅ {_get_package_version('icalendar')}")
+        import icalendar
+        print(f"  icalendar    : ✅ {icalendar.__version__}")
     except ImportError:
         print("  icalendar    : ⚠️  not installed  (pip install 'taskmd[export]')")
 
@@ -497,20 +532,42 @@ def handle_args(args, service, config, parser):
             if not args.name:
                 add_task_wizard(service)
             else:
+                # ── Quick Capture: parse inline tokens from the name string ──
+                from taskmd.quick_capture import parse_quick_capture
+                cap = parse_quick_capture(args.name)
+
+                for w in cap.warnings:
+                    print(f"\033[93m[!] {w}\033[0m")
+
+                # CLI flags override inline tokens when explicitly provided
                 tags = None
                 if args.tags:
                     tags = [t.strip().lower() for t in args.tags.split(",")]
+                elif cap.tags:
+                    tags = cap.tags
+
                 task = service.add_task(
-                    args.name,
-                    section=args.section,
-                    sub=args.sub,
-                    due=args.due,
-                    pri=args.pri,
+                    cap.name if cap.name else args.name,
+                    section=args.section if args.section != "Uncategorized" else (cap.section or args.section),
+                    sub=args.sub if args.sub != "General" else (cap.sub or args.sub),
+                    due=parse_flexible_date(args.due) if args.due else cap.due,
+                    pri=args.pri if args.pri is not None else cap.pri,
                     tags=tags,
-                    start=args.start,
+                    start=parse_flexible_date(args.start) if args.start else cap.start,
                     course=args.course,
+                    rem=cap.rem,
                 )
                 print(f"\033[92m[OK] Task added: [{task.id}] {task.name}\033[0m")
+                if cap.due and not args.due:
+                    print(f"     due={cap.due}", end="")
+                if cap.pri and args.pri is None:
+                    print(f"  pri={cap.pri}", end="")
+                if cap.tags and not args.tags:
+                    print(f"  tags={cap.tags}", end="")
+                # end inline summary line if anything was printed
+                has_inline = (cap.due and not args.due) or (cap.pri and args.pri is None) or (cap.tags and not args.tags)
+                if has_inline:
+                    print()
 
         elif args.command == "done":
             service.change_status(args.id, "[x]")
@@ -535,6 +592,15 @@ def handle_args(args, service, config, parser):
             else:
                 print(f"\033[92m[OK] Removed {count} completed task(s).\033[0m")
 
+        elif args.command == "clear":
+            print("\033[91m⚠️  WARNING: You are about to clear ALL tasks from your file.\033[0m")
+            confirm = input("Are you sure? (type 'yes' to confirm): ").strip().lower()
+            if confirm == "yes":
+                service.clear_all()
+                print("\033[92m[OK] All tasks cleared.\033[0m")
+            else:
+                print("\033[93m[INFO] Clear cancelled.\033[0m")
+
         elif args.command == "edit":
             service.edit_name(args.id, args.name)
             print("\033[92m[OK] Name updated.\033[0m")
@@ -547,17 +613,19 @@ def handle_args(args, service, config, parser):
                 print("\033[92m[OK] Task moved.\033[0m")
 
         elif args.command == "due":
-            if not is_valid_date(args.date):
-                print("\033[91m[!] Invalid date format. Must be YYYY-MM-DD.\033[0m")
+            d = parse_flexible_date(args.date)
+            if not is_valid_date(d):
+                print(f"\033[91m[!] Invalid date format: {args.date}\033[0m")
             else:
-                service.set_metadata(args.id, "due", args.date)
+                service.set_metadata(args.id, "due", d)
                 print("\033[92m[OK] Due date updated.\033[0m")
 
         elif args.command == "start":
-            if not is_valid_date(args.date):
-                print("\033[91m[!] Invalid date format. Must be YYYY-MM-DD.\033[0m")
+            d = parse_flexible_date(args.date)
+            if not is_valid_date(d):
+                print(f"\033[91m[!] Invalid date format: {args.date}\033[0m")
             else:
-                service.set_metadata(args.id, "start", args.date)
+                service.set_metadata(args.id, "start", d)
                 print("\033[92m[OK] Start date updated.\033[0m")
 
         elif args.command == "rem":
@@ -723,16 +791,16 @@ def _handle_dashboard(args, service, config):
             tasks = service.get_all_tasks()
             stats = service.get_stats()
             if RICH_AVAILABLE:
-                from rich.console import Group  # type: ignore
+                from rich.console import Group
                 from io import StringIO
                 # Build renderable layout
                 from taskmd.ui.dashboard import RichDashboard
                 d = RichDashboard()
                 # Return a simple renderable for live mode
-                from rich.panel import Panel  # type: ignore
-                from rich.text import Text  # type: ignore
+                from rich.panel import Panel
+                from rich.text import Text
                 from taskmd.ui.dashboard import _group_by_section, _section_progress, _make_progress_bar, _format_task_row_rich
-                from rich.console import Console  # type: ignore
+                from rich.console import Console
                 from io import StringIO
 
                 buf = Console(file=StringIO(), highlight=False)
@@ -816,9 +884,11 @@ def _handle_export(args, service, config):
         do_week = getattr(args, "week", False)
 
         if do_week or week_offset > 0:
-            default_out = output or Path(f"report_week.md")
-            content = generate_weekly_report(tasks, week_offset=week_offset, output_path=default_out)
-            print(f"\033[92m[OK] Weekly report exported → {default_out}\033[0m")
+            content = generate_weekly_report(tasks, week_offset=week_offset, output_path=output)
+            if output:
+                print(f"\033[92m[OK] Weekly report exported → {output}\033[0m")
+            else:
+                print(content)
         else:
             # Default: print daily report to stdout, optionally save
             from datetime import date
@@ -828,6 +898,45 @@ def _handle_export(args, service, config):
             else:
                 print(content)
 
+    elif fmt == "pdf":
+        try:
+            from taskmd.exporters.pdf_exporter import export_pdf
+        except ImportError as e:
+            print(f"\033[91m[!] {e}\033[0m")
+            return
+        default_out = output or Path("tasks_report.pdf")
+        month = getattr(args, "month", None)
+        export_pdf(
+            tasks, output_path=default_out, month=month,
+            theme=getattr(args, "theme", "light"),
+            only_pending=only_pending,
+        )
+        print(f"\033[92m[OK] PDF exported → {default_out}\033[0m")
+        if month:
+            print(f"\033[90m  Filtered to month: {month}\033[0m")
+
+    elif fmt == "svg":
+        from taskmd.exporters.image_exporter import export_svg
+        default_out = output or Path("tasks_board.svg")
+        export_svg(tasks, output_path=default_out, theme=getattr(args, "theme", "light"))
+        print(f"\033[92m[OK] SVG exported → {default_out}\033[0m")
+        print("\033[90m  Open in any browser or vector editor (Inkscape, Figma, etc.)\033[0m")
+
+    elif fmt == "png":
+        try:
+            from taskmd.exporters.image_exporter import export_png
+        except ImportError as e:
+            print(f"\033[91m[!] {e}\033[0m")
+            return
+        default_out = output or Path("tasks_board.png")
+        scale = getattr(args, "scale", 2.0)
+        try:
+            export_png(tasks, output_path=default_out,
+                       theme=getattr(args, "theme", "light"), scale=scale)
+            print(f"\033[92m[OK] PNG exported → {default_out}  (scale={scale})\033[0m")
+        except ImportError as e:
+            print(f"\033[91m[!] {e}\033[0m")
+
 
 # ─── REPL ─────────────────────────────────────────────────────────────────────
 
@@ -835,21 +944,22 @@ def run_repl(service, config):
     """Run the interactive REPL loop."""
     parser = get_parser(interactive=True)
 
-    # Daily reset check
-    is_new_day, daily_count = service.check_daily_reset()
-    if is_new_day and daily_count > 0:
-        print(f"\n\033[93m[SYSTEM] New day detected ({service._today_str()}).\033[0m")
-        try:
-            ans = input(f"Reset {daily_count} 'Daily' task(s) to incomplete? (y/n): ")
-        except (EOFError, KeyboardInterrupt):
-            ans = "n"
-        if ans.strip().lower() == "y":
-            service.reset_daily_tasks()
-            print("\033[92m[OK] Daily tasks reset.\033[0m")
+    # Recurring reset check
+    needs_action, count = service.check_recurring_tasks()
+    if needs_action:
+        if count > 0:
+            print(f"\n\033[93m[SYSTEM] New cycle detected ({service._today_str()}).\033[0m")
+            try:
+                ans = input(f"Reset {count} recurring task(s) to incomplete? (y/n): ")
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans.strip().lower() == "y":
+                service.apply_recurring_tasks()
+                print("\033[92m[OK] Tasks reset for the new cycle.\033[0m")
+            else:
+                service.skip_recurring_reset()
         else:
-            service.skip_daily_reset()
-    elif is_new_day:
-        service.skip_daily_reset()
+            service.skip_recurring_reset()
 
     # Initial dashboard
     try:
@@ -895,6 +1005,16 @@ def main():
     if len(sys.argv) == 1:
         run_repl(service, config)
     else:
+        # Check for recurring resets before CLI commands (except read-only ones)
+        if len(sys.argv) > 1 and sys.argv[1] not in ("list", "stats", "today", "next", "overdue", "search", "config", "validate", "help"):
+            needs_action, count = service.check_recurring_tasks()
+            if needs_action:
+                if count > 0:
+                    print(f"\033[93m[SYSTEM] {count} recurring task(s) reset for new cycle.\033[0m")
+                    service.apply_recurring_tasks()
+                else:
+                    service.skip_recurring_reset()
+
         parser = get_parser(interactive=False)
         try:
             args = parser.parse_args()
