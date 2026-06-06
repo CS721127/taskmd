@@ -4,99 +4,139 @@
 
 ## 第一部分：常规问题修复 (General Issues)
 
-### Issue 1: 缺少 clear 命令
-描述：无法清除所有当前任务并重新开始
-要求：需要二次确认以防误删  
-优先级：中
+### Issue 1: 不是所有的feature都在tm help里包含了: 如 clear, -v
 
-### Issue 2: 缺少版本查询选项
-描述：tm -v / --version 不可用
-影响：无法清晰检测版本状况
-优先级：低
-
-### Issue 3: 任务 ID 显示混淆
+### Issue 2: export 等除了list的地方任务 ID 显示混淆
 当前状态：显示 t_xx (内部ID格式)
 用户期望：显示 xx (简短格式)
-影响：用户需要输入 xx 但看到 t_xx，容易混淆
 优先级：中
 
-### Issue 4: Dashboard 布局异常
-表现：格式错乱、对齐问题
-示例：
-  ```
-  [bold white]Inbox[/bold white]  [green]██████████ 100%[/]                    │ 📅 Today     │
-  │   [dim]── General[/dim]  [dim]██████ 100%[/dim]                          │   (none)     │
-  │   ⚪ [t_01] ✅ My First Task                                               │              │
-  │ [bold white]Migrated[/bold white]  [yellow]░░░░░░░░░░   0%[/]            │ 🔴 Overdue   │
-  ```
-优先级：中
+### Issue 3: pdf导出时过长文本会被忽略为......，考虑换行
 
-### Issue 5: Export Report 输出异常
-问题：tm export report --week 存入 md 文件，而非输出到 stdout
-期望：应直接显示到控制台（可选保存）
-优先级：低
+### Issue 4: dashboard -live应该可以调出一个控制面板，有UI界面的而不是仅仅CLI，dashboard改为dashboard cli
 
-### Issue 6: 日期输入与精度支持
-需求1：支持具体截止时间（不仅是日期）
-需求2：灵活的日期输入格式解析
-示例：@tomorrow @next-monday @2-weeks 2026-04-25 14:30 Apr 25 2026 ...
-优先级：中
+### Issue 5: 
+事件截止时间应当可以精确到几点几分，可以供用户选择更加精准的时间管理，同时，today，next等如果有精确时间应当写为xx天xx小时；且ics导出也要精准
+---
 
-### Issue 7: Validate 检测逻辑
-问题：tm validate 需要重新确认检测逻辑
-优先级：中
+## 第二部分：Phase 9-15 补全 (Feature Completion)
+## Phase 9：主题与审美完成度（Themes & Aesthetic Polish）
+
+### 目标
+提升视觉完成度（Polish）与 GitHub 展示效果（Presentation Value）。
+
+### 关键任务
+- Zero-Config Themes
+- 主题与 Heatmap / Progress / Icons 统一映射
+- 屏幕截图与演示 GIF 素材准备
+
+### 验收标准
+- 主题切换稳定
+- 界面具有明显产品质感（Product Feel）
 
 ---
 
-## 第二部分：Phase 7-8 补全 (Feature Completion)
+## Phase 10：Task Sidecar 与 Easy Start 基础版（Task Sidecar & Easy Start Foundations）
 
-### 任务 1: Quick Capture Syntax (优先级：高)
+### 目标
+把任务从“待办项（Todo）”升级为“执行入口（Execution Entry）”。
 
-功能目标
-  tm add "Read paper #research #ml !4 @2026-04-25"
+### 关键任务
+- 定义 Task Sidecar 文件结构
+- 支持资源链接（Resource Linking）
+- 支持动作模板（Action Profiles）
+- `tm open <id>`
+- 打开 URL / file / folder / pdf / note
+- 自定义 opener hook（带确认）
 
-当前状态
-  tm add "Read paper" --tags research,ml --pri 4 --due 2026-04-25
-
-缺失内容
-需要在 CLI 层实现内联解析器，识别以下语法：
-
-| 符号 | 含义 | 示例 |
-|------|------|------|
-| #tag | 标签 | #research #ml |
-| !priority | 优先级 (0-5) | !4 |
-| @date | 截止日期 (YYYY-MM-DD) | @2026-04-25 |
-| ^start_date | 开始日期 | ^2026-04-20 |
+### 验收标准
+- 单个任务可以关联复杂上下文，但主任务文件仍然简洁
 
 ---
 
-### 任务 2: Recurring Tasks Automation (优先级：中)
+## Phase 11：Easy Start 纵深场景（Deep Easy Start Scenarios）
 
-功能目标
-  - [ ] Daily standup <!-- recur:daily -->
-  - [ ] Weekly demo <!-- recur:weekly-mon -->
-  - [ ] Monthly review <!-- recur:monthly-1st -->
+### 目标
+让不同类型任务可以“一键进入工作环境（One-click Start）”。
 
-当前实现状态
+### 关键任务
+- Dev Profile：打开 repo / VS Code / terminal
+- Academic Profile：打开 PDF / notes / course folder
+- Meeting Profile：打开会议链接 / 纪要 / 汇报文档
+- Paper Profile：打开论文 PDF / notes / review draft
+- 完成任务时可选知识归档（Knowledge Handoff）
 
-| 组件 | 状态 |
-|------|------|
-| 字段存储 (recur field) | 已实现 |
-| Daily Section 自动重置 | 已实现 |
-| Cron 解析器 | 缺失 |
-| 自动生成/更新逻辑 | 缺失 |
+### 验收标准
+- 用户不只是“看见任务”，而是“点开就能开始做”
 
-需要实现
+---
 
-1. Recur 字段值规范
-   - daily — 每天重置
-   - weekly-{day} — 每周指定日期 (mon/tue/wed...)
-   - monthly-{date} — 每月指定日期
-   - custom-cron — 自定义 cron 表达式
+## Phase 12：Academic Mode / Semester Mode（学期模式）
 
-2. 解析与调度逻辑
-   - 解析 recur 字段值
-   - 判断是否应该重复生成或重置状态
+### 目标
+服务课程型（Course-based）与学术型（Academic）用户。
 
-3. 自动生成机制
-   - 每日/周/月检查并生成新任务或重置现有任务
+### 关键任务
+- 课程代码高亮（Course Code Highlighting）
+- `--course` 聚合视图
+- 从 syllabus / course outline 抓取 deadline（需确认）
+- 课程资料联动（Material Sync）
+- 一键备课 / 复习动作模板（Teaching / Review Bundle）
+
+### 验收标准
+- 对高校 / tutoring / research 用户明显有吸引力
+
+---
+
+## Phase 13：Risk Engine / Hard Deadline View（风险引擎）
+
+### 目标
+解决“多个 Assignment 一起堆积时，如何合理分配注意力”的问题。
+
+### 关键任务
+- 引入 `weight` 字段
+- 设计 `Pressure = Weight / max(Time_Left_Days, 1)`
+- `tm risk`
+- 支持按压力值排序与高亮
+- 与 Heatmap 协同渲染
+
+### 验收标准
+- 用户能快速看出真正高风险任务，而不是只看最近 due date
+
+---
+
+## Phase 14：外部 TODO 吸取（TODO Harvesting）
+
+### 目标
+从代码仓库（Code Repos）或 Markdown 文档中吸取 TODO 线索（TODO Signals）。
+
+### 关键任务
+- 扫描 `TODO / FIXME / NOTE`
+- 生成候选任务列表
+- 用户确认后导入
+- 如果可推断日期，仅作为建议（Suggestion）而非自动写入
+
+### 验收标准
+- 降低开发者把注释 TODO 手工搬到任务系统的成本
+
+---
+
+## Phase 15：专注模式与沉浸式工作入口（Focus & Work Entry）
+
+### 目标
+让 TaskMD 从任务系统进化为轻量工作入口（Lightweight Work Launcher）。
+
+### 关键任务
+- `tm focus <id>`
+- 倒计时 / 番茄钟（Pomodoro）
+- 可选背景音频（Optional Audio）
+- Focus Session Logging
+- `tm start <id>` 与 Action Profiles 联动
+
+### 验收标准
+- 用户可从任务直接进入专注工作状态
+
+---
+
+
+
