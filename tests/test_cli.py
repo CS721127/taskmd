@@ -2,6 +2,7 @@
 import pytest
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 
@@ -36,8 +37,9 @@ def cli_env(tmp_path):
 
 def run_tm(args: list, env_overrides: dict = None):
     """Run the tm CLI as a subprocess."""
-    import os
     env = os.environ.copy()
+    src_path = str(Path(__file__).parent.parent / "src")
+    env["PYTHONPATH"] = src_path + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
     if env_overrides:
         env.update(env_overrides)
 

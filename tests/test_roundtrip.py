@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from taskmd.parser import parse_markdown
 from taskmd.writer import write_markdown
-from conftest import BASIC_TASKS_MD, COMPLEX_TASKS_MD
+from taskmd.test_data import BASIC_TASKS_MD, COMPLEX_TASKS_MD
 
 
 def _tasks_are_equivalent(tasks_a, tasks_b) -> bool:

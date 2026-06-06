@@ -7,7 +7,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from taskmd.parser import parse_markdown
-from conftest import BASIC_TASKS_MD, COMPLEX_TASKS_MD, MANUAL_EDIT_MD
+from taskmd.test_data import BASIC_TASKS_MD, COMPLEX_TASKS_MD, MANUAL_EDIT_MD
 
 
 class TestDocumentMetadata:

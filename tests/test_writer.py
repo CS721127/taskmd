@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from taskmd.parser import parse_markdown
 from taskmd.writer import write_markdown, _format_task_line
 from taskmd.models import Task, TaskDocument
-from conftest import BASIC_TASKS_MD, COMPLEX_TASKS_MD
+from taskmd.test_data import BASIC_TASKS_MD, COMPLEX_TASKS_MD
 
 
 class TestFullRegeneration:

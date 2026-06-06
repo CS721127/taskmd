@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from taskmd.service import TaskService
 from taskmd.repository import TaskRepository
 from taskmd.exceptions import TaskNotFoundError
+from taskmd.test_data import BASIC_TASKS_MD, COMPLEX_TASKS_MD, MANUAL_EDIT_MD
 
 
 class TestAddTask:
@@ -257,7 +258,6 @@ class TestIDRepair:
     """Test ID assignment and duplicate repair."""
 
     def test_assign_missing_ids(self, tmp_path):
-        from conftest import COMPLEX_TASKS_MD
         task_file = tmp_path / "tasks.md"
         task_file.write_text(COMPLEX_TASKS_MD, encoding="utf-8")
         repo = TaskRepository(task_file)

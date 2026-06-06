@@ -1,5 +1,5 @@
 """
-Tests for Phase 5-8 features.
+Tests for Phase 5–8 features.
 
 Phase 5 : Rich UI & Live Editing (heatmap, dashboard rendering)
 Phase 6 : Auto-Timestamp, Soft Deadlines & Heatmap Reminders
@@ -400,6 +400,14 @@ class TestJsonExporter:
 
 # ─── Phase 8: ICS Exporter ───────────────────────────────────────────────────
 
+def _has_icalendar():
+    try:
+        import icalendar
+        return True
+    except ImportError:
+        return False
+
+@pytest.mark.skipif(not _has_icalendar(), reason="icalendar not installed")
 class TestIcsExporter:
 
     def test_vcalendar_header(self, sample_tasks):
