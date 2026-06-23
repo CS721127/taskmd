@@ -20,41 +20,53 @@ import shlex
 import re
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Optional
 
 from taskmd import __version__
 from taskmd.config import load_config, get_config_summary, init_default_config, get_config_file
 from taskmd.repository import TaskRepository
 from taskmd.service import TaskService
 from taskmd.exceptions import TaskNotFoundError, TaskMDError
+from taskmd.id_utils import short_id
 
 
 # ─── Utility ─────────────────────────────────────────────────────────────────
 
-def short_id(task_id: str) -> str:
-    """Convert internal ID to user-friendly short form: 't_01' -> '01'."""
-    if task_id and task_id.startswith("t_"):
-        return task_id[2:]
-    return task_id or "?"
-
 
 def get_time_left(due: str) -> str:
-    """Format time remaining until due date."""
+    """Format time remaining until due date/time.
+
+    Shows whole days ("3d left") for date-only due values, or "Xd Yh" / "Yh Zm"
+    precision once the due value carries an HH:MM time component
+    (TODOs.md Issue 5).
+    """
     if not due:
         return ""
-    try:
-        due_date = datetime.strptime(due[:10], "%Y-%m-%d")
-        delta = due_date.date() - datetime.now().date()
-        if delta.days < 0:
-            return "\033[91m(OVERDUE)\033[0m"
-        elif delta.days == 0:
-            return "\033[91m(DUE TODAY)\033[0m"
-        elif delta.days <= 3:
-            return f"\033[91m(⏳ {delta.days}d left)\033[0m"
-        elif delta.days <= 7:
-            return f"\033[93m(⏳ {delta.days}d left)\033[0m"
-        return f"\033[90m(⏳ {delta.days}d left)\033[0m"
-    except ValueError:
+    from taskmd.datetime_utils import parse_task_datetime, has_time_component, format_remaining
+    due_dt = parse_task_datetime(due)
+    if due_dt is None:
         return "\033[91m(Invalid Date)\033[0m"
+
+    precise = has_time_component(due)
+    now_dt = datetime.now()
+    days_for_color = (due_dt.date() - now_dt.date()).days
+    # For date-only values, "past" means the calendar date has passed (not
+    # merely that midnight of today has elapsed). For precise values, "past"
+    # means the exact due moment has elapsed.
+    is_past = (days_for_color < 0) if not precise else (due_dt < now_dt)
+    label = format_remaining(due, now_dt).lstrip("-")
+
+    if is_past:
+        if precise:
+            return f"\033[91m(OVERDUE {label} ago)\033[0m"
+        return "\033[91m(OVERDUE)\033[0m"
+    if days_for_color == 0 and not precise:
+        return "\033[91m(DUE TODAY)\033[0m"
+    if days_for_color <= 3:
+        return f"\033[91m(⏳ {label} left)\033[0m"
+    elif days_for_color <= 7:
+        return f"\033[93m(⏳ {label} left)\033[0m"
+    return f"\033[90m(⏳ {label} left)\033[0m"
 
 
 def is_valid_date(date_str: str) -> bool:
@@ -113,16 +125,22 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm todo <id>                              Mark as undone [ ]
    tm rm <id>                                Delete task
    tm rm_done                                Delete ALL completed tasks
+   tm clear                                  Delete ALL tasks (with confirmation)
    tm edit <id> <name>                       Edit task name
    tm move <id> --section <s> --sub <b>      Move task across sections
 
  \033[1mMetadata\033[0m
-   tm due <id> <YYYY-MM-DD>                  Set deadline
-   tm start <id> <YYYY-MM-DD>               Set attention start date
+   tm due <id> <date>                        Set deadline (YYYY-MM-DD or "YYYY-MM-DD HH:MM")
+   tm start <id> <date>                      Set attention start date (same formats as due)
    tm rem <id> <text>                        Set remark
    tm pri <id> <level>                       Set priority (0-5)
    tm tag <id> add <tag>                     Add tag
    tm tag <id> rm <tag>                      Remove tag
+
+ \033[1mTags\033[0m
+   tm tags                                   List all tags in use, with counts
+   tm tags <name>                            Show all tasks carrying that tag
+   tm list --tag <name>                      Filter the task list to one tag
 
  \033[1mViews\033[0m
    tm list [--sort tree|priority|due|name]   View all tasks
@@ -140,18 +158,23 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm archive                                Archive completed tasks
    tm config show                            Show current config
    tm config edit                            Open config file in editor
-   tm doctor                                 Diagnose environment
+   tm doctor                                 Diagnose environment & dependencies
+   tm migrate txt-to-md                      Convert a legacy .txt task file to .md
 
  \033[1mREPL\033[0m
    tm help                                   Show this help
+   tm intro                                  About TaskMD: what it is, author, version
+   tm -v / --version                         Show installed taskmd version
    tm exit                                   Save and quit
 
  \033[1mQuick Capture\033[0m   (Phase 7 — inline tokens)
    tm add "Write report #work !3 @2026-04-25"
    tm add "Buy milk #errand @tomorrow"
    tm add "Review PR !2 @+3d /Work //Docs [check CI first]"
+   tm add "Standup #work @tomorrowT09:30"           (precise due time)
      Tokens: #tag  !priority(1-5)  @due-date  ^start-date  /section  //sub  [note]
      Dates:  @today @tomorrow @mon…@sun @+Nd YYYY-MM-DD
+     Precise time: append T HH:MM to any date token, e.g. @tomorrowT14:30
 
  \033[1mDashboard & UI\033[0m   (Phase 5 — requires: pip install 'taskmd[ui]')
    tm dashboard                              Rich dashboard view
@@ -161,13 +184,21 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
  \033[1mExport\033[0m   (Phase 8)
    tm export csv    [--output f.csv]         Export to CSV
    tm export json   [--output f.json]        Export to JSON
-   tm export html   [--output board.html]    Export HTML kanban board  [--theme light|dark]
+   tm export html   [--output board.html]    Export HTML kanban board  [--theme light|dark] [--group-by status|section|sub]
    tm export svg    [--output board.svg]     Export static SVG board   [--theme light|dark]
    tm export png    [--output board.png]     Export PNG image          [--theme dark] [--scale 2.0]
    tm export pdf    [--output report.pdf]    Export PDF report         [--month 2026-04]
    tm export ics    [--output tasks.ics]     Export iCalendar          (requires 'taskmd[export]')
    tm export report                          Print daily report
    tm export report --week [--output r.md]   Weekly report
+   tm export source [--output path.md]       Copy the live schedule .md source file
+   tm export md     [--output path.md]       Alias for "export source"
+   tm export txt    [--output path.txt]      Export schedule as simplified plain text
+
+   By default, exports land in the current directory. Set a default
+   export folder with: tm config edit  →  export_dir = "/path/to/folder"
+   (or env var TASKMD_EXPORT_DIR). Giving --output a path with a folder
+   in it (e.g. "backups/board.html") always overrides the default folder.
 
 \033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m
 """
@@ -264,9 +295,17 @@ def get_parser(interactive=False):
     p_tag.add_argument("action", choices=["add", "rm"])
     p_tag.add_argument("tag_value")
 
+    # ─ tags (Issue 8: list/filter by tag) ─
+    p_tags = subparsers.add_parser("tags")
+    p_tags.add_argument("tag", nargs="?", default=None,
+                         help="If given, list tasks carrying this tag instead of the tag summary")
+    p_tags.add_argument("--sort", choices=["count", "name"], default="count",
+                         help="Sort tag summary by frequency (default) or name")
+
     # ─ list ─
     p_list = subparsers.add_parser("list")
     p_list.add_argument("--sort", choices=["tree", "priority", "due", "name"], default="tree")
+    p_list.add_argument("--tag", default=None, help="Only show tasks carrying this tag")
 
     # ─ sort (alias) ─
     p_sort = subparsers.add_parser("sort")
@@ -312,13 +351,15 @@ def get_parser(interactive=False):
     p_export = subparsers.add_parser("export")
     p_export.add_argument(
         "format",
-        choices=["csv", "json", "ics", "html", "report", "pdf", "svg", "png"],
+        choices=["csv", "json", "ics", "html", "report", "pdf", "svg", "png", "source", "md", "txt"],
         help="Export format",
     )
     p_export.add_argument("--output", "-o", default=None, help="Output file path")
     p_export.add_argument("--pretty", action="store_true", default=True, help="Pretty-print JSON")
     p_export.add_argument("--only-pending", action="store_true", help="Only export pending tasks")
     p_export.add_argument("--theme", choices=["light", "dark"], default="light", help="Visual theme")
+    p_export.add_argument("--group-by", choices=["status", "section", "sub"], default="status",
+                           help="HTML board column grouping (html export only)")
     p_export.add_argument("--week", action="store_true", help="Generate weekly report")
     p_export.add_argument("--week-offset", type=int, default=0, help="Week offset (0=this week)")
     p_export.add_argument("--month", default=None, help="Filter by month YYYY-MM (pdf only)")
@@ -326,6 +367,7 @@ def get_parser(interactive=False):
 
     # ─ REPL ─
     subparsers.add_parser("help")
+    subparsers.add_parser("intro")
     subparsers.add_parser("exit")
 
     return parser
@@ -466,10 +508,70 @@ def display_stats(stats):
     print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
 
 
+def display_intro():
+    """Display project introduction: what TaskMD is, who made it, and version info.
+
+    Covers TODOs.md Issue 10 — "添加一个简介指令... 介绍这个项目在干什么，
+    作者，日期版本等等所有的信息" (add an intro command describing what
+    the project does, its authors, version, etc).
+    """
+    import platform
+
+    print("\n\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    print("\033[1m  📋 TaskMD — Markdown-Native Task Management\033[0m")
+    print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+
+    print("""
+ \033[1mWhat it is\033[0m
+   TaskMD treats a plain Markdown file as the database. There's no hidden
+   binary format and no server — the .md file you already use in your
+   editor (VS Code, Obsidian, Vim, ...) *is* the task list. The CLI is an
+   accelerator layered on top, not a gatekeeper: every command just reads
+   and rewrites that same readable, version-control-friendly file.
+
+ \033[1mWhy it exists\033[0m
+   Most task managers lock your data behind an app or a proprietary
+   format. TaskMD inverts that: tasks stay portable, diffable, and
+   editable by hand, while the CLI adds the speed of structured queries,
+   sorting, exports, and a live dashboard on top — best of both worlds.
+
+ \033[1mWho it's for\033[0m
+   Developers, researchers, students, and anyone who already lives in
+   Markdown and wants a minimal but genuinely extensible task workflow,
+   without signing up for a SaaS product.
+""")
+
+    print(f" \033[1mProject\033[0m")
+    print(f"   Name          : taskmd (TaskMD)")
+    print(f"   Version       : {__version__}")
+    print(f"   License       : MIT")
+    print(f"   Authors       : TaskMD Contributors, CS72127")
+    print(f"   Language      : Python {platform.python_version()}+ (requires >=3.9)")
+    print(f"   Run on        : {platform.system()} {platform.release()}")
+
+    print("""
+ \033[1mLearn more\033[0m
+   tm help          → full command reference
+   tm doctor         → check your environment & optional dependencies
+   tm config show    → see where your data and config files live
+""")
+    print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+
+
 def display_doctor(config):
-    """Display environment diagnostic info."""
+    """Display a comprehensive environment diagnostic (TODOs.md Issue 9).
+
+    Checks:
+      - Python version & platform
+      - Core file paths (task file, config, backup dir, archive)
+      - Every optional dependency taskmd can use, grouped by feature area,
+        with the exact `pip install` command to fix any that are missing
+      - Write permissions on key directories
+      - Task file parse health (counts + warnings)
+    """
     from taskmd.paths import get_config_dir, get_backup_dir, get_archive_file
     import platform
+    import importlib
 
     config_file = get_config_file()
     backup_dir = get_backup_dir()
@@ -478,34 +580,87 @@ def display_doctor(config):
     print("\n\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
     print("\033[1m  🩺 DOCTOR — Environment Diagnostic\033[0m")
     print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+
+    print("\n \033[1mSystem\033[0m")
     print(f"  Python       : {platform.python_version()}")
     print(f"  Platform     : {platform.system()} {platform.release()}")
+    print(f"  taskmd       : {__version__}")
+
+    print("\n \033[1mFiles & Paths\033[0m")
     print(f"  Task file    : {config.task_file} {'✅' if config.task_file.exists() else '❌ NOT FOUND'}")
     print(f"  Config file  : {config_file} {'✅' if config_file.exists() else '⚠️  (using defaults)'}")
     print(f"  Backup dir   : {backup_dir} {'✅' if backup_dir.exists() else '❌'}")
     print(f"  Archive file : {archive_file} {'✅' if archive_file.exists() else '—'}")
+    print(f"  Export dir   : {config.export_dir} {'✅' if Path(config.export_dir).exists() else '❌ NOT FOUND'}")
     print(f"  Editor       : {config.editor}")
     print(f"  Timezone     : {config.timezone}")
     print(f"  Theme        : {config.theme}")
 
-    # Optional dependency checks
-    try:
-        import rich
-        print(f"  rich         : ✅ {rich.__version__}")
-    except ImportError:
-        print("  rich         : ⚠️  not installed  (pip install 'taskmd[ui]')")
-    try:
-        import watchdog
-        print(f"  watchdog     : ✅ {watchdog.__version__}")
-    except ImportError:
-        print("  watchdog     : ⚠️  not installed  (pip install 'taskmd[ui]')")
-    try:
-        import icalendar
-        print(f"  icalendar    : ✅ {icalendar.__version__}")
-    except ImportError:
-        print("  icalendar    : ⚠️  not installed  (pip install 'taskmd[export]')")
+    # Write-permission checks on the directories taskmd actually writes to
+    print("\n \033[1mPermissions\033[0m")
+    for label, d in (
+        ("Task file dir", config.task_file.parent),
+        ("Backup dir   ", backup_dir),
+        ("Export dir   ", Path(config.export_dir)),
+    ):
+        if d.exists() and os.access(d, os.W_OK):
+            print(f"  {label} : ✅ writable ({d})")
+        elif d.exists():
+            print(f"  {label} : ❌ NOT writable ({d})")
+        else:
+            print(f"  {label} : ⚠️  does not exist yet ({d})")
+
+    # ── Dependency checks, grouped by feature area ──────────────────────
+    # (module_name, display_name, install_hint)
+    dep_groups = [
+        ("Dashboard / Live UI  (pip install 'taskmd[ui]')", [
+            ("rich", "rich", "taskmd[ui]"),
+            ("watchdog", "watchdog", "taskmd[ui]"),
+        ]),
+        ("Export — Calendar    (pip install 'taskmd[export]')", [
+            ("icalendar", "icalendar", "taskmd[export]"),
+        ]),
+        ("Export — PDF report  (pip install 'taskmd[export]')", [
+            ("fpdf", "fpdf2", "taskmd[export]"),
+        ]),
+        ("Export — SVG/PNG     (pip install 'taskmd[export]')", [
+            ("cairosvg", "cairosvg", "taskmd[export]"),
+            ("PIL", "Pillow", "taskmd[export]"),
+        ]),
+        ("Config file (TOML)   (built-in on Python 3.11+)", [
+            ("tomllib", "tomllib (stdlib, 3.11+)", None),
+            ("tomli", "tomli", "tomli"),
+            ("tomli_w", "tomli_w", "tomli_w"),
+        ]),
+    ]
+
+    missing_any = []
+    print("\n \033[1mDependencies\033[0m")
+    for group_label, deps in dep_groups:
+        print(f"  \033[90m{group_label}\033[0m")
+        for module_name, display_name, install_hint in deps:
+            try:
+                mod = importlib.import_module(module_name)
+                version = getattr(mod, "__version__", None)
+                ver_str = f" {version}" if version else ""
+                print(f"    {display_name:<22}: ✅{ver_str}")
+            except ImportError:
+                if install_hint:
+                    print(f"    {display_name:<22}: ⚠️  not installed  (pip install {install_hint})")
+                    missing_any.append((display_name, install_hint))
+                else:
+                    # e.g. tomllib missing on Python <3.11 but a fallback exists
+                    print(f"    {display_name:<22}: —  (not on this Python version; fallback available)")
+
+    if missing_any:
+        print(f"\n  \033[93m{len(missing_any)} optional dependenc{'y' if len(missing_any)==1 else 'ies'} missing.\033[0m"
+              f" Install everything at once with:")
+        print("    \033[1mpip install 'taskmd[all]'\033[0m")
+    else:
+        print("\n  \033[92mAll optional dependencies are installed.\033[0m")
 
     # Check task file health
+    print("\n \033[1mTask File Health\033[0m")
     if config.task_file.exists():
         try:
             from taskmd.parser import parse_markdown
@@ -515,11 +670,15 @@ def display_doctor(config):
             warning_count = len(doc.warnings)
             print(f"  Tasks loaded : \033[92m{task_count}\033[0m")
             if warning_count:
-                print(f"  ⚠️  Warnings  : \033[93m{warning_count}\033[0m")
+                print(f"  ⚠️  Warnings  : \033[93m{warning_count}\033[0m  (run 'tm validate' for details)")
+            else:
+                print("  Warnings     : \033[92mnone\033[0m")
         except Exception as e:
             print(f"  Parse status : \033[91mFAILED — {e}\033[0m")
+    else:
+        print("  \033[93mNo task file yet — it will be created on first 'tm add'.\033[0m")
 
-    print("\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
+    print("\n\033[96m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m")
 
 
 # ─── Command Handler ─────────────────────────────────────────────────────────
@@ -641,6 +800,32 @@ def handle_args(args, service, config, parser):
             action_str = "added" if args.action == "add" else "removed"
             print(f"\033[92m[OK] Tag '{args.tag_value}' {action_str}.\033[0m")
 
+        elif args.command == "tags":
+            if args.tag:
+                # Show tasks carrying this specific tag
+                matches = service.get_tasks_by_tag(args.tag)
+                if not matches:
+                    print(f"\033[93m[INFO] No tasks tagged '#{args.tag}'.\033[0m")
+                else:
+                    print(f"\n\033[1m  🏷  Tasks tagged #{args.tag} ({len(matches)}):\033[0m")
+                    for t in matches:
+                        print(format_task(t, show_section=True))
+            else:
+                # Summary view: every tag in use, with counts
+                tag_counts = service.get_all_tags()
+                if not tag_counts:
+                    print("\033[93m[INFO] No tags in use yet. Add one with: tm tag <id> add <tag>\033[0m")
+                else:
+                    items = list(tag_counts.items())
+                    if args.sort == "name":
+                        items.sort(key=lambda kv: kv[0].lower())
+                    print(f"\n\033[1m  🏷  Tags in use ({len(items)}):\033[0m")
+                    width = max(len(name) for name, _ in items) + 2
+                    for name, count in items:
+                        bar = "█" * min(count, 30)
+                        print(f"      \033[35m#{name:<{width}}\033[0m {count:>3}  \033[90m{bar}\033[0m")
+                    print("\n      \033[90mtm tags <name>   → show tasks with that tag\033[0m")
+
         elif args.command in ("list", "sort"):
             sort_mode = "tree"
             if args.command == "sort":
@@ -650,6 +835,15 @@ def handle_args(args, service, config, parser):
                 sort_mode = args.sort
 
             tasks = service.get_all_tasks()
+            tag_filter = getattr(args, "tag", None)
+            if tag_filter:
+                tasks = [
+                    t for t in tasks
+                    if t.tags and any(tag_filter.lower() == tg.lower() for tg in t.tags)
+                ]
+                if not tasks:
+                    print(f"\033[93m[INFO] No tasks tagged '#{tag_filter}'.\033[0m")
+                    return
             display_task_list(tasks, config, sort_mode)
 
         elif args.command == "today":
@@ -748,6 +942,9 @@ def handle_args(args, service, config, parser):
         elif args.command == "help":
             parser.print_help()
 
+        elif args.command == "intro":
+            display_intro()
+
         elif args.command == "exit":
             sys.exit(0)
 
@@ -839,6 +1036,49 @@ def _handle_dashboard(args, service, config):
 
 # ─── Phase 8: Export Handler ──────────────────────────────────────────────────
 
+def _resolve_export_path(filename: str, output: Optional[Path], config) -> Path:
+    """Resolve the final path for an export file.
+
+    - If --output was given with a directory component (e.g. "out/board.html"
+      or an absolute path), it's honoured exactly as given.
+    - If --output was given as a bare filename (e.g. "board.html"), or omitted
+      entirely (using the format's default filename), it's placed inside
+      config.export_dir (default: current directory; configurable via
+      `tm config edit` → export_dir, or TASKMD_EXPORT_DIR) — TODOs.md Issue 7.
+    """
+    target = output if output is not None else Path(filename)
+    if target.is_absolute() or target.parent != Path("."):
+        return target
+    export_dir = getattr(config, "export_dir", None) or Path.cwd()
+    return Path(export_dir) / target.name
+
+
+def _handle_export_source(args, service, config, fmt: str):
+    """Handle `tm export source|md|txt` — export the raw .md schedule file itself
+    (optionally converted to plain text), TODOs.md Issue 7.
+    """
+    from taskmd.exporters.source_exporter import export_source
+
+    as_txt = fmt == "txt"
+    default_name = "tasks_source.txt" if as_txt else "tasks_source.md"
+    output = Path(args.output) if args.output else None
+    target = _resolve_export_path(default_name, output, config)
+
+    source_path = config.task_file
+    try:
+        export_source(source_path, target, as_txt=as_txt)
+    except FileNotFoundError as e:
+        print(f"\033[91m[!] {e}\033[0m")
+        return
+
+    kind = "Plain-text" if as_txt else "Markdown source"
+    print(f"\033[92m[OK] {kind} exported → {target}\033[0m")
+    if as_txt:
+        print("\033[90m  Converted from markdown: headers, checkboxes, and hidden metadata simplified.\033[0m")
+    else:
+        print("\033[90m  This is a copy — editing it won't affect your live task file.\033[0m")
+
+
 def _handle_export(args, service, config):
     """Handle the `tm export <format>` command."""
     tasks = service.get_all_tasks()
@@ -848,13 +1088,13 @@ def _handle_export(args, service, config):
 
     if fmt == "csv":
         from taskmd.exporters.csv_exporter import export_csv
-        default_out = output or Path("tasks_export.csv")
+        default_out = _resolve_export_path("tasks_export.csv", output, config)
         export_csv(tasks, output_path=default_out, only_pending=only_pending)
         print(f"\033[92m[OK] CSV exported → {default_out}\033[0m")
 
     elif fmt == "json":
         from taskmd.exporters.json_exporter import export_json
-        default_out = output or Path("tasks_export.json")
+        default_out = _resolve_export_path("tasks_export.json", output, config)
         pretty = getattr(args, "pretty", True)
         export_json(tasks, output_path=default_out, pretty=pretty, only_pending=only_pending)
         print(f"\033[92m[OK] JSON exported → {default_out}\033[0m")
@@ -865,16 +1105,17 @@ def _handle_export(args, service, config):
         except ImportError as e:
             print(f"\033[91m[!] {e}\033[0m")
             return
-        default_out = output or Path("tasks.ics")
+        default_out = _resolve_export_path("tasks.ics", output, config)
         export_ics(tasks, output_path=default_out, only_pending=only_pending)
         print(f"\033[92m[OK] ICS exported → {default_out}\033[0m")
         print("\033[90m  Import this file into Google Calendar, Apple Calendar, or Outlook.\033[0m")
 
     elif fmt == "html":
         from taskmd.exporters.html_exporter import export_html
-        default_out = output or Path("tasks_board.html")
+        default_out = _resolve_export_path("tasks_board.html", output, config)
         theme = getattr(args, "theme", "light")
-        export_html(tasks, output_path=default_out, theme=theme)
+        group_by = getattr(args, "group_by", "status")
+        export_html(tasks, output_path=default_out, theme=theme, group_by=group_by)
         print(f"\033[92m[OK] HTML board exported → {default_out}\033[0m")
         print("\033[90m  Open in any browser. No server required.\033[0m")
 
@@ -882,19 +1123,23 @@ def _handle_export(args, service, config):
         from taskmd.exporters.report import generate_weekly_report, generate_daily_report
         week_offset = getattr(args, "week_offset", 0)
         do_week = getattr(args, "week", False)
+        resolved_output = _resolve_export_path(
+            "weekly_report.md" if (do_week or week_offset > 0) else "daily_report.md",
+            output, config
+        ) if output else None
 
         if do_week or week_offset > 0:
-            content = generate_weekly_report(tasks, week_offset=week_offset, output_path=output)
-            if output:
-                print(f"\033[92m[OK] Weekly report exported → {output}\033[0m")
+            content = generate_weekly_report(tasks, week_offset=week_offset, output_path=resolved_output)
+            if resolved_output:
+                print(f"\033[92m[OK] Weekly report exported → {resolved_output}\033[0m")
             else:
                 print(content)
         else:
             # Default: print daily report to stdout, optionally save
             from datetime import date
-            content = generate_daily_report(tasks, target_date=date.today(), output_path=output)
-            if output:
-                print(f"\033[92m[OK] Daily report exported → {output}\033[0m")
+            content = generate_daily_report(tasks, target_date=date.today(), output_path=resolved_output)
+            if resolved_output:
+                print(f"\033[92m[OK] Daily report exported → {resolved_output}\033[0m")
             else:
                 print(content)
 
@@ -904,7 +1149,7 @@ def _handle_export(args, service, config):
         except ImportError as e:
             print(f"\033[91m[!] {e}\033[0m")
             return
-        default_out = output or Path("tasks_report.pdf")
+        default_out = _resolve_export_path("tasks_report.pdf", output, config)
         month = getattr(args, "month", None)
         export_pdf(
             tasks, output_path=default_out, month=month,
@@ -917,7 +1162,7 @@ def _handle_export(args, service, config):
 
     elif fmt == "svg":
         from taskmd.exporters.image_exporter import export_svg
-        default_out = output or Path("tasks_board.svg")
+        default_out = _resolve_export_path("tasks_board.svg", output, config)
         export_svg(tasks, output_path=default_out, theme=getattr(args, "theme", "light"))
         print(f"\033[92m[OK] SVG exported → {default_out}\033[0m")
         print("\033[90m  Open in any browser or vector editor (Inkscape, Figma, etc.)\033[0m")
@@ -928,7 +1173,7 @@ def _handle_export(args, service, config):
         except ImportError as e:
             print(f"\033[91m[!] {e}\033[0m")
             return
-        default_out = output or Path("tasks_board.png")
+        default_out = _resolve_export_path("tasks_board.png", output, config)
         scale = getattr(args, "scale", 2.0)
         try:
             export_png(tasks, output_path=default_out,
@@ -936,6 +1181,9 @@ def _handle_export(args, service, config):
             print(f"\033[92m[OK] PNG exported → {default_out}  (scale={scale})\033[0m")
         except ImportError as e:
             print(f"\033[91m[!] {e}\033[0m")
+
+    elif fmt in ("source", "md", "txt"):
+        _handle_export_source(args, service, config, fmt)
 
 
 # ─── REPL ─────────────────────────────────────────────────────────────────────
@@ -1006,7 +1254,7 @@ def main():
         run_repl(service, config)
     else:
         # Check for recurring resets before CLI commands (except read-only ones)
-        if len(sys.argv) > 1 and sys.argv[1] not in ("list", "stats", "today", "next", "overdue", "search", "config", "validate", "help"):
+        if len(sys.argv) > 1 and sys.argv[1] not in ("list", "stats", "today", "next", "overdue", "search", "config", "validate", "help", "doctor", "tags", "intro"):
             needs_action, count = service.check_recurring_tasks()
             if needs_action:
                 if count > 0:
