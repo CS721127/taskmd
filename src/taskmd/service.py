@@ -19,6 +19,7 @@ from pathlib import Path
 from taskmd.models import Task, TaskDocument
 from taskmd.repository import TaskRepository
 from taskmd.exceptions import TaskNotFoundError, ValidationError
+from taskmd.datetime_utils import parse_task_date, parse_task_datetime, has_time_component
 
 
 class TaskService:
@@ -104,18 +105,20 @@ class TaskService:
 
     def get_today(self) -> List[Task]:
         """Return tasks due today or in attention window (start <= today < due), incomplete only."""
-        today = self._today_str()
+        today = datetime.now().date()
         tasks = self.get_all_tasks()
         result = []
         for t in tasks:
             if t.status == "[x]":
                 continue
-            if t.due == today:
+            due_date = parse_task_date(t.due)
+            if due_date == today:
                 result.append(t)
                 continue
             # In attention window: start_date <= today and no due, or due is in the future
-            if t.start and t.start <= today:
-                if not t.due or t.due > today:
+            start_date = parse_task_date(t.start)
+            if start_date is not None and start_date <= today:
+                if due_date is None or due_date > today:
                     result.append(t)
         return result
 
@@ -128,25 +131,33 @@ class TaskService:
         for t in tasks:
             if t.status == "[x]" or not t.due:
                 continue
-            try:
-                due_date = datetime.strptime(t.due, "%Y-%m-%d").date()
-                if today <= due_date <= end:
-                    result.append(t)
-            except ValueError:
+            due_date = parse_task_date(t.due)
+            if due_date is None:
                 continue
+            if today <= due_date <= end:
+                result.append(t)
         result.sort(key=lambda t: t.due)
         return result
 
     def get_overdue(self) -> List[Task]:
-        """Return incomplete tasks past their due date."""
-        today = self._today_str()
+        """Return incomplete tasks past their due date/time."""
+        now_dt = datetime.now()
+        today = now_dt.date()
         tasks = self.get_all_tasks()
         result = []
         for t in tasks:
             if t.status == "[x]" or not t.due:
                 continue
-            if t.due < today:
+            due_date = parse_task_date(t.due)
+            if due_date is None:
+                continue
+            if due_date < today:
                 result.append(t)
+            elif due_date == today and has_time_component(t.due):
+                # Precise due time today that has already passed counts as overdue.
+                due_dt = parse_task_datetime(t.due)
+                if due_dt is not None and due_dt < now_dt:
+                    result.append(t)
         result.sort(key=lambda t: t.due)
         return result
 
@@ -158,8 +169,12 @@ class TaskService:
         in_progress = sum(1 for t in tasks if t.status == "[-]")
         todo = sum(1 for t in tasks if t.status == "[ ]")
         overdue = len(self.get_overdue())
+        today_date = datetime.now().date()
         today_str = self._today_str()
-        today_count = sum(1 for t in tasks if t.due == today_str and t.status != "[x]")
+        today_count = sum(
+            1 for t in tasks
+            if t.status != "[x]" and parse_task_date(t.due) == today_date
+        )
 
         # Completed today (by done_ts date)
         completed_today = sum(
@@ -238,12 +253,43 @@ class TaskService:
             ]
 
         if due_before:
-            result = [t for t in result if t.due and t.due <= due_before]
+            cutoff = parse_task_date(due_before)
+            if cutoff is not None:
+                result = [
+                    t for t in result
+                    if t.due and parse_task_date(t.due) is not None and parse_task_date(t.due) <= cutoff
+                ]
 
         if due_after:
-            result = [t for t in result if t.due and t.due >= due_after]
+            cutoff = parse_task_date(due_after)
+            if cutoff is not None:
+                result = [
+                    t for t in result
+                    if t.due and parse_task_date(t.due) is not None and parse_task_date(t.due) >= cutoff
+                ]
 
         return result
+
+    def get_all_tags(self) -> Dict[str, int]:
+        """Return a dict of {tag: count} across all tasks, sorted by frequency desc then name.
+
+        Used to power `tm tags` (TODOs.md Issue 8 — list/filter/sort by tag).
+        """
+        tasks = self.get_all_tasks()
+        counts: Dict[str, int] = {}
+        for t in tasks:
+            for tag in (t.tags or []):
+                counts[tag] = counts.get(tag, 0) + 1
+        # Sort by count desc, then alphabetically for stable, readable output
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower())))
+
+    def get_tasks_by_tag(self, tag: str) -> List[Task]:
+        """Return all tasks (any status) carrying the given tag (case-insensitive)."""
+        tag_lower = tag.lower()
+        return [
+            t for t in self.get_all_tasks()
+            if t.tags and any(tag_lower == existing.lower() for existing in t.tags)
+        ]
 
     # ─── Write Operations ────────────────────────────────────────────────
 
@@ -679,7 +725,11 @@ class TaskService:
                         try:
                             current_due = datetime.strptime(task.due[:10], "%Y-%m-%d").date()
                             next_due = get_next_due(spec, current_due)
-                            task.due = next_due.isoformat()
+                            if has_time_component(task.due):
+                                time_part = task.due[11:16] or task.due[-5:]
+                                task.due = f"{next_due.isoformat()} {time_part}"
+                            else:
+                                task.due = next_due.isoformat()
                         except ValueError:
                             pass
 
