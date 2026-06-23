@@ -65,6 +65,7 @@ class Config:
     auto_git_backup: bool = False
     default_view: str = "tree"
     archive_file: Path = None
+    export_dir: Path = None
 
     def __post_init__(self):
         if self.task_file is None:
@@ -72,6 +73,10 @@ class Config:
         if self.archive_file is None:
             from taskmd.paths import get_archive_file
             self.archive_file = get_archive_file()
+        if self.export_dir is None:
+            # Default: current working directory, matching legacy behaviour
+            # (exports land next to wherever the user ran `tm` from).
+            self.export_dir = Path.cwd()
 
 
 # Default values used when nothing is configured
@@ -82,6 +87,7 @@ _DEFAULTS = {
     "timezone": "Australia/Sydney",
     "auto_git_backup": False,
     "default_view": "tree",
+    "export_dir": None,  # Will resolve to Path.cwd()
 }
 
 # Mapping from env var names to config keys
@@ -90,6 +96,7 @@ _ENV_MAP = {
     "TASKMD_THEME": "theme",
     "TASKMD_EDITOR": "editor",
     "TASKMD_TIMEZONE": "timezone",
+    "TASKMD_EXPORT_DIR": "export_dir",
 }
 
 
@@ -133,6 +140,10 @@ def load_config(cli_overrides: dict = None) -> Config:
     if merged.get("db_path"):
         task_file = Path(os.path.expanduser(merged["db_path"]))
 
+    export_dir = None
+    if merged.get("export_dir"):
+        export_dir = Path(os.path.expanduser(merged["export_dir"]))
+
     return Config(
         task_file=task_file,
         theme=merged["theme"],
@@ -140,6 +151,7 @@ def load_config(cli_overrides: dict = None) -> Config:
         timezone=merged["timezone"],
         auto_git_backup=merged["auto_git_backup"],
         default_view=merged["default_view"],
+        export_dir=export_dir,
     )
 
 
@@ -158,6 +170,7 @@ def get_config_summary() -> str:
         f"  Timezone      : {config.timezone}",
         f"  Default view  : {config.default_view}",
         f"  Git backup    : {config.auto_git_backup}",
+        f"  Export dir    : {config.export_dir}",
     ]
     return "\n".join(lines)
 
@@ -173,6 +186,7 @@ def init_default_config():
             "timezone": "Australia/Sydney",
             "auto_git_backup": False,
             "default_view": "tree",
+            "export_dir": str(Path.cwd()),
         }
         _save_toml(config_file, default_data)
         return True
