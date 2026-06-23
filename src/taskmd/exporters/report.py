@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Optional, Dict
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
+from taskmd.datetime_utils import parse_task_date
 from taskmd.ui.heatmap import get_urgency_level, URGENCY_OVERDUE, URGENCY_DUE_TODAY, URGENCY_DUE_SOON, URGENCY_DUE_UPCOMING
 
 
@@ -75,7 +77,7 @@ def generate_weekly_report(
             lines.append(f"**{sec}**")
             for t in sec_tasks:
                 done_on = t.done_ts[:10] if t.done_ts else "?"
-                lines.append(f"- {t.name} `[{t.id}]` _(completed {done_on})_")
+                lines.append(f"- {t.name} `[{short_id(t.id)}]` _(completed {done_on})_")
             lines.append("")
     else:
         lines.append("_No tasks completed this week._")
@@ -85,12 +87,9 @@ def generate_weekly_report(
     due_this_week = []
     for t in tasks:
         if t.due and t.status != "[x]":
-            try:
-                due_date = datetime.strptime(t.due, "%Y-%m-%d").date()
-                if monday <= due_date <= sunday:
-                    due_this_week.append(t)
-            except ValueError:
-                pass
+            due_date = parse_task_date(t.due)
+            if due_date is not None and monday <= due_date <= sunday:
+                due_this_week.append(t)
 
     lines.append(f"## 📅 Due This Week ({len(due_this_week)})")
     lines.append("")
@@ -101,7 +100,7 @@ def generate_weekly_report(
             urgency_mark = "🔴" if urgency == URGENCY_OVERDUE else "⚡" if urgency == URGENCY_DUE_TODAY else "📌"
             pri_str = f" Pri:{t.pri}" if t.pri else ""
             tags_str = f" [{', '.join(t.tags)}]" if t.tags else ""
-            lines.append(f"- {urgency_mark} **{t.name}** `[{t.id}]` Due: {t.due}{pri_str}{tags_str}")
+            lines.append(f"- {urgency_mark} **{t.name}** `[{short_id(t.id)}]` Due: {t.due}{pri_str}{tags_str}")
         lines.append("")
     else:
         lines.append("_No tasks due this week._")
@@ -110,7 +109,9 @@ def generate_weekly_report(
     # ── Overdue ──────────────────────────────────────────────────────────
     overdue = [
         t for t in tasks
-        if t.due and t.status != "[x]" and t.due < monday.isoformat()
+        if t.due and t.status != "[x]"
+        and (parse_task_date(t.due) is not None)
+        and parse_task_date(t.due) < monday
     ]
     overdue.sort(key=lambda t: t.due)
 
@@ -118,8 +119,9 @@ def generate_weekly_report(
     lines.append("")
     if overdue:
         for t in overdue:
-            days_late = (_today() - datetime.strptime(t.due, "%Y-%m-%d").date()).days
-            lines.append(f"- **{t.name}** `[{t.id}]` Due: {t.due} _(+{days_late}d)_")
+            due_date = parse_task_date(t.due)
+            days_late = (_today() - due_date).days
+            lines.append(f"- **{t.name}** `[{short_id(t.id)}]` Due: {t.due} _(+{days_late}d)_")
         lines.append("")
     else:
         lines.append("_No overdue tasks. Great work!_ 🎉")
@@ -131,7 +133,7 @@ def generate_weekly_report(
     lines.append("")
     if in_progress:
         for t in in_progress:
-            lines.append(f"- {t.name} `[{t.id}]` _{t.section}/{t.sub}_")
+            lines.append(f"- {t.name} `[{short_id(t.id)}]` _{t.section}/{t.sub}_")
         lines.append("")
     else:
         lines.append("_None._")
@@ -215,7 +217,7 @@ def generate_daily_report(
     if due_today:
         for t in sorted(due_today, key=lambda t: (t.pri or 0) * -1):
             pri = f" `P{t.pri}`" if t.pri else ""
-            lines.append(f"- {_status_label(t.status)} **{t.name}** `[{t.id}]`{pri}")
+            lines.append(f"- {_status_label(t.status)} **{t.name}** `[{short_id(t.id)}]`{pri}")
         lines.append("")
     else:
         lines.append("_Nothing due today._")
@@ -231,21 +233,26 @@ def generate_daily_report(
     lines.append("")
     if completed_today:
         for t in completed_today:
-            lines.append(f"- {t.name} `[{t.id}]`")
+            lines.append(f"- {t.name} `[{short_id(t.id)}]`")
         lines.append("")
     else:
         lines.append("_None yet._")
         lines.append("")
 
     # Overdue
-    overdue = [t for t in tasks if t.due and t.due < date_str and t.status != "[x]"]
+    overdue = [
+        t for t in tasks
+        if t.due and t.status != "[x]"
+        and parse_task_date(t.due) is not None
+        and parse_task_date(t.due) < target_date
+    ]
     if overdue:
         overdue.sort(key=lambda t: t.due)
         lines.append(f"## 🔴 Overdue ({len(overdue)})")
         lines.append("")
         for t in overdue[:10]:
-            days_late = (target_date - datetime.strptime(t.due, "%Y-%m-%d").date()).days
-            lines.append(f"- **{t.name}** `[{t.id}]` _{t.due} (+{days_late}d)_")
+            days_late = (target_date - parse_task_date(t.due)).days
+            lines.append(f"- **{t.name}** `[{short_id(t.id)}]` _{t.due} (+{days_late}d)_")
         if len(overdue) > 10:
             lines.append(f"_...and {len(overdue) - 10} more._")
         lines.append("")

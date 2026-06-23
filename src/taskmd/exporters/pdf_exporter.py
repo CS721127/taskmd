@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
 from taskmd.ui.heatmap import get_urgency_level, URGENCY_OVERDUE, URGENCY_DUE_TODAY, URGENCY_DUE_SOON
 
 
@@ -259,56 +260,119 @@ class _TaskPDF:
         self.pdf.cell(w - 4, 5, f"  {name}", ln=False)
         self.pdf.ln(7)
 
+    def _wrap_text(self, text: str, max_width: float, font_size: float) -> list:
+        """Word-wrap text to fit within max_width at the current font.
+
+        Falls back to hard character-splitting for single words that are
+        themselves wider than max_width (e.g. long URLs/identifiers), so
+        nothing is ever silently dropped or replaced with '...'.
+        """
+        if not text:
+            return [""]
+
+        words = text.split(" ")
+        lines = []
+        current = ""
+
+        def width(s):
+            return self.pdf.get_string_width(s)
+
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if width(candidate) <= max_width or not current:
+                # Word fits, or line is still empty (must place at least one word)
+                if not current and width(word) > max_width:
+                    # Single word wider than the column — hard split it
+                    chunk = ""
+                    for ch in word:
+                        if width(chunk + ch) > max_width and chunk:
+                            lines.append(chunk)
+                            chunk = ch
+                        else:
+                            chunk += ch
+                    current = chunk
+                else:
+                    current = candidate
+            else:
+                lines.append(current)
+                current = word
+                if width(current) > max_width:
+                    # New word alone is too wide — hard split it too
+                    chunk = ""
+                    for ch in current:
+                        if width(chunk + ch) > max_width and chunk:
+                            lines.append(chunk)
+                            chunk = ch
+                        else:
+                            chunk += ch
+                    current = chunk
+
+        if current:
+            lines.append(current)
+        return lines or [""]
+
     def task_row(self, task: Task):
         color = _task_color(task, self.p)
         r, g, b = color
         sym = _status_sym(task)
         pri = task.pri  # integer or None — rendered below as "*" repeats
 
-        y = self.pdf.get_y()
         x = self.MARGIN + 6
+        name_x = x + 6 + 16 + 12  # offset of the name column from the row start
+        avail = self.PAGE_W - 2 * self.MARGIN - 6 - 6 - 16 - 12 - 28
 
-        # Soft zebra stripe for done tasks
+        # Name (strip any non-latin-1 chars for fpdf2 core font compatibility)
+        name = task.name
+        name_safe = name.encode("latin-1", errors="replace").decode("latin-1")
+
+        self.pdf.set_font("Helvetica", "B" if task.status != "[x]" else "", 9)
+        name_lines = self._wrap_text(name_safe, avail, 9)
+        line_h = 6
+        row_h = line_h * len(name_lines)
+
+        y = self.pdf.get_y()
+
+        # Soft zebra stripe for done tasks — sized to the full wrapped height
         if task.status == "[x]":
             rd, gd, bd = self.p["bar_empty"]
             self.pdf.set_fill_color(rd, gd, bd)
-            self.pdf.rect(x - 1, y - 0.5, self.PAGE_W - 2 * self.MARGIN - 8, 6.5, "F")
+            self.pdf.rect(x - 1, y - 0.5, self.PAGE_W - 2 * self.MARGIN - 8, row_h + 0.5, "F")
 
         # Status symbol
         self.pdf.set_text_color(r, g, b)
         self.pdf.set_font("Helvetica", "B", 9)
         self.pdf.set_xy(x, y)
-        self.pdf.cell(6, 6, sym, ln=False)
+        self.pdf.cell(6, line_h, sym, ln=False)
 
         # ID
         ri, gi, bi = self.p["id_color"]
         self.pdf.set_text_color(ri, gi, bi)
         self.pdf.set_font("Helvetica", "", 8)
-        self.pdf.cell(16, 6, f"[{task.id or '?'}]", ln=False)
+        self.pdf.cell(16, line_h, f"[{short_id(task.id)}]", ln=False)
 
         # Priority
         if pri:
             self.pdf.set_text_color(*self.p["overdue"])
             self.pdf.set_font("Helvetica", "B", 8)
-            self.pdf.cell(12, 6, "*" * task.pri if task.pri else "", ln=False)
+            self.pdf.cell(12, line_h, "*" * task.pri if task.pri else "", ln=False)
         else:
-            self.pdf.cell(12, 6, "", ln=False)
+            self.pdf.cell(12, line_h, "", ln=False)
 
-        # Name (strip any non-latin-1 chars for fpdf2 core font compatibility)
+        # Name — render each wrapped line, left-aligned at name_x
         self.pdf.set_text_color(r, g, b)
         self.pdf.set_font("Helvetica", "B" if task.status != "[x]" else "", 9)
-        name = task.name
-        name_safe = name.encode("latin-1", errors="replace").decode("latin-1")
-        avail = self.PAGE_W - 2 * self.MARGIN - 6 - 6 - 16 - 12 - 28
-        self.pdf.cell(avail, 6, name_safe[:60] + ("..." if len(name_safe) > 60 else ""), ln=False)
+        for i, line_text in enumerate(name_lines):
+            self.pdf.set_xy(name_x, y + i * line_h)
+            self.pdf.cell(avail, line_h, line_text, ln=False)
 
-        # Due date
+        # Due date — aligned with the first name line
         if task.due:
+            self.pdf.set_xy(name_x + avail, y)
             self.pdf.set_font("Helvetica", "", 7)
             self.pdf.set_text_color(r, g, b)
-            self.pdf.cell(28, 6, task.due, ln=False)
+            self.pdf.cell(28, line_h, task.due, ln=False)
 
-        self.pdf.ln(6)
+        self.pdf.set_xy(self.MARGIN, y + row_h)
 
         # Tags / note line (ASCII-safe)
         if task.tags or task.rem:
@@ -322,7 +386,7 @@ class _TaskPDF:
             if task.rem:
                 rem_safe = task.rem.encode("latin-1", errors="replace").decode("latin-1")
                 detail += f"  <- {rem_safe}"
-            self.pdf.cell(0, 4, detail[:100], ln=True)
+            self.pdf.multi_cell(0, 4, detail, align="L")
 
     def add_tasks_page(self, groups: dict):
         self.pdf.add_page()
@@ -407,10 +471,10 @@ class _TaskPDF:
                     for t in tsks[:5]: # Max 5 per cell
                         color = _task_color(t, self.p)
                         self.pdf.set_text_color(*color)
-                        name_short = (t.name[:18] + "..") if len(t.name) > 18 else t.name
-                        name_safe = name_short.encode("latin-1", errors="replace").decode("latin-1")
+                        name_safe = t.name.encode("latin-1", errors="replace").decode("latin-1")
+                        name_short = (name_safe[:18] + "..") if len(name_safe) > 18 else name_safe
                         self.pdf.set_x(x + 2)
-                        self.pdf.cell(col_w-4, 4, f"• {name_safe}", ln=True)
+                        self.pdf.cell(col_w-4, 4, f"- {name_short}", ln=True)
                     if len(tsks) > 5:
                         self.pdf.set_x(x + 2)
                         self.pdf.cell(col_w-4, 4, f"+ {len(tsks)-5} more", ln=True)

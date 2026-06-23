@@ -4,15 +4,18 @@ HTML Board Exporter for TaskMD.
 Generates a single-file HTML kanban board with inline CSS + JS.
 No server required — just open the HTML file in a browser.
 
-Columns: [ ] Todo | [-] In Progress | [x] Done
+Default grouping: [ ] Todo | [-] In Progress | [x] Done
+Also supports grouping columns by section or subsection
+(see TODOs.md Issue 2 — "html 导出的内容应当可以按照section，subsection等分类方式进行").
 
-Supports: --theme light|dark
+Supports: --theme light|dark   --group-by status|section|sub
 """
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
 from taskmd.ui.heatmap import get_urgency_level, URGENCY_OVERDUE, URGENCY_DUE_TODAY, URGENCY_DUE_SOON
 
 
@@ -25,7 +28,16 @@ def _urgency_class(task: Task) -> str:
     }.get(level, "")
 
 
-def _task_card_html(task: Task) -> str:
+def _status_badge_html(task: Task) -> str:
+    """Small status badge shown on cards when columns are NOT grouped by status."""
+    label, cls = {
+        "[x]": ("Done", "status-done"),
+        "[-]": ("In Progress", "status-progress"),
+    }.get(task.status, ("Todo", "status-todo"))
+    return f'<span class="status-badge {cls}">{label}</span>'
+
+
+def _task_card_html(task: Task, show_status_badge: bool = False) -> str:
     """Render a single task as an HTML card."""
     urgency_cls = _urgency_class(task)
     pri_stars = "★" * task.pri if task.pri else ""
@@ -48,11 +60,13 @@ def _task_card_html(task: Task) -> str:
         rem_html = f'<div class="rem">💬 {task.rem}</div>'
 
     section_html = f'<div class="section-label">{task.section} / {task.sub}</div>'
+    status_html = _status_badge_html(task) if show_status_badge else ""
 
     return f"""
-    <div class="card {urgency_cls}" data-id="{task.id}" data-section="{task.section}">
+    <div class="card {urgency_cls}" data-id="{task.id}" data-section="{task.section}" data-sub="{task.sub}" data-status="{task.status}">
       <div class="card-header">
-        <span class="task-id">{task.id}</span>
+        <span class="task-id">[{short_id(task.id)}]</span>
+        {status_html}
         {f'<span class="priority">{pri_stars}</span>' if pri_stars else ""}
       </div>
       <div class="task-name">{task.name}</div>
@@ -77,10 +91,52 @@ def _section_filter_buttons(tasks: List[Task]) -> str:
     return "\n    ".join(buttons)
 
 
+def _build_columns(tasks: List[Task], group_by: str) -> "list[tuple[str, str, str, List[Task]]]":
+    """Build (column_id, title, icon, tasks) tuples for the requested grouping.
+
+    group_by:
+      "status"  (default) -> Todo / In Progress / Done
+      "section" -> one column per top-level section, ordered by first appearance
+      "sub"     -> one column per "Section / Sub" pair, ordered by first appearance
+    """
+    if group_by == "section":
+        order: List[str] = []
+        groups: Dict[str, List[Task]] = {}
+        for t in tasks:
+            key = t.section or "Uncategorized"
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(t)
+        return [(f"col-{i}", key, "📁", groups[key]) for i, key in enumerate(order)]
+
+    if group_by == "sub":
+        order = []
+        groups = {}
+        for t in tasks:
+            key = f"{t.section or 'Uncategorized'} / {t.sub or 'General'}"
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(t)
+        return [(f"col-{i}", key, "📂", groups[key]) for i, key in enumerate(order)]
+
+    # default: status
+    todo = [t for t in tasks if t.status == "[ ]"]
+    in_progress = [t for t in tasks if t.status == "[-]"]
+    done = [t for t in tasks if t.status == "[x]"]
+    return [
+        ("col-todo", "Todo", "☐", sorted(todo, key=lambda t: (t.pri or 0) * -1)),
+        ("col-progress", "In Progress", "🔄", in_progress),
+        ("col-done", "Done", "✅", done),
+    ]
+
+
 def export_html(
     tasks: List[Task],
     output_path: Optional[Path] = None,
     theme: str = "light",
+    group_by: str = "status",
 ) -> str:
     """
     Export tasks as a single-file HTML kanban board.
@@ -89,21 +145,35 @@ def export_html(
         tasks: List of Task objects to export.
         output_path: If provided, write to this file. Otherwise return as string.
         theme: "light" or "dark".
+        group_by: "status" (default), "section", or "sub" — controls how
+            tasks are split into board columns (TODOs.md Issue 2).
 
     Returns:
         HTML content as a string (also written to file if output_path given).
     """
-    todo = [t for t in tasks if t.status == "[ ]"]
-    in_progress = [t for t in tasks if t.status == "[-]"]
-    done = [t for t in tasks if t.status == "[x]"]
+    group_by = group_by if group_by in ("status", "section", "sub") else "status"
+    show_status_badge = group_by != "status"
+
+    columns = _build_columns(tasks, group_by)
 
     exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    todo_cards = "".join(_task_card_html(t) for t in sorted(
-        todo, key=lambda t: (t.pri or 0) * -1
-    ))
-    in_progress_cards = "".join(_task_card_html(t) for t in in_progress)
-    done_cards = "".join(_task_card_html(t) for t in done)
+    column_html_parts = []
+    for col_id, title, icon, col_tasks in columns:
+        cards_html = "".join(_task_card_html(t, show_status_badge) for t in col_tasks)
+        empty_msg = f'<div class="empty-col">No tasks</div>'
+        column_html_parts.append(f"""
+    <div class="column">
+      <div class="column-header">
+        <span class="column-title">{icon} {title}</span>
+        <span class="badge">{len(col_tasks)}</span>
+      </div>
+      <div class="cards" id="{col_id}">
+        {cards_html if cards_html else empty_msg}
+      </div>
+    </div>""")
+    columns_html = "".join(column_html_parts)
+    num_cols = max(len(columns), 1)
 
     is_dark = theme == "dark"
     bg = "#1a1a2e" if is_dark else "#f0f2f5"
@@ -165,10 +235,7 @@ def export_html(
       padding-bottom: 10px;
       border-bottom: 2px solid {border_color};
     }}
-    .column-title {{ font-size: 1rem; font-weight: 700; }}
-    .col-todo .column-title {{ color: #4a9eff; }}
-    .col-progress .column-title {{ color: #f5a623; }}
-    .col-done .column-title {{ color: #4caf50; }}
+    .column-title {{ font-size: 1rem; font-weight: 700; color: {header_bg}; }}
     .badge {{
       background: {header_bg};
       color: white;
@@ -177,6 +244,15 @@ def export_html(
       font-size: 0.8rem;
       font-weight: 600;
     }}
+    .status-badge {{
+      font-size: 0.68rem;
+      padding: 1px 7px;
+      border-radius: 8px;
+      font-weight: 600;
+    }}
+    .status-todo {{ background: #e3eefe; color: #2868c7; }}
+    .status-progress {{ background: #fff3e0; color: #c77700; }}
+    .status-done {{ background: #e3f7e6; color: #2e8b3d; }}
     .card {{
       background: {card_bg};
       border: 1px solid {border_color};
@@ -256,7 +332,7 @@ def export_html(
 <body>
   <header>
     <h1>📋 TaskMD Board</h1>
-    <div class="meta">Exported: {exported_at} &nbsp;|&nbsp; Total: {len(tasks)} tasks</div>
+    <div class="meta">Exported: {exported_at} &nbsp;|&nbsp; Total: {len(tasks)} tasks &nbsp;|&nbsp; Grouped by: {group_by}</div>
   </header>
 
   <div class="search-bar">
@@ -265,34 +341,7 @@ def export_html(
     {_section_filter_buttons(tasks)}
   </div>
 
-  <div class="board">
-    <div class="column col-todo">
-      <div class="column-header">
-        <span class="column-title">☐ Todo</span>
-        <span class="badge">{len(todo)}</span>
-      </div>
-      <div class="cards" id="col-todo">
-        {todo_cards if todo_cards else '<div class="empty-col">No pending tasks</div>'}
-      </div>
-    </div>
-    <div class="column col-progress">
-      <div class="column-header">
-        <span class="column-title">🔄 In Progress</span>
-        <span class="badge">{len(in_progress)}</span>
-      </div>
-      <div class="cards" id="col-progress">
-        {in_progress_cards if in_progress_cards else '<div class="empty-col">No tasks in progress</div>'}
-      </div>
-    </div>
-    <div class="column col-done">
-      <div class="column-header">
-        <span class="column-title">✅ Done</span>
-        <span class="badge">{len(done)}</span>
-      </div>
-      <div class="cards" id="col-done">
-        {done_cards if done_cards else '<div class="empty-col">No completed tasks</div>'}
-      </div>
-    </div>
+  <div class="board" style="grid-template-columns: repeat({num_cols}, 1fr);">{columns_html}
   </div>
 
   <script>
