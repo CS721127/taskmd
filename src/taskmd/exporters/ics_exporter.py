@@ -12,6 +12,8 @@ from typing import List, Optional
 import hashlib
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
+from taskmd.datetime_utils import has_time_component, parse_task_datetime, parse_task_date
 
 
 def _check_icalendar():
@@ -71,14 +73,12 @@ def export_ics(
     cal.add("x-wr-calname", calendar_name)
 
     for task in due_tasks:
-        try:
-            if " " in task.due:
-                due_dt = datetime.strptime(task.due, "%Y-%m-%d %H:%M")
-                is_all_day = False
-            else:
-                due_dt = datetime.strptime(task.due, "%Y-%m-%d").date()
-                is_all_day = True
-        except ValueError:
+        is_all_day = not has_time_component(task.due)
+        if is_all_day:
+            due_dt = parse_task_date(task.due)
+        else:
+            due_dt = parse_task_datetime(task.due)
+        if due_dt is None:
             continue
 
         event = Event()
@@ -94,7 +94,7 @@ def export_ics(
             event.add("dtend", due_dt + timedelta(hours=1))
 
         # Description with full task metadata
-        desc_parts = [f"TaskMD ID: {task.id}"]
+        desc_parts = [f"TaskMD ID: {short_id(task.id)}"]
         if task.section:
             desc_parts.append(f"Section: {task.section}/{task.sub}")
         if task.status:

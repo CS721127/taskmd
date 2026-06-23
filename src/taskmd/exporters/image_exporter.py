@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
 from taskmd.ui.heatmap import (
     get_urgency_level,
     URGENCY_OVERDUE,
@@ -203,7 +204,7 @@ def _build_svg(tasks: List[Task], theme: str = "light") -> str:
             )
 
             # ID badge
-            id_text = task.id[2:] if (task.id and task.id.startswith("t_")) else (task.id or "?")
+            id_text = short_id(task.id)
             lines.append(
                 f'<text x="{card_x + 12}" y="{card_y + 16}" '
                 f'fill="{pal["card_id"]}" font-size="10" font-family="monospace">'
