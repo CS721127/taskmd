@@ -16,6 +16,7 @@ from datetime import datetime, date
 from typing import Optional
 
 from taskmd.models import Task
+from taskmd.datetime_utils import parse_task_date
 
 
 # ─── Urgency constants ────────────────────────────────────────────────────────
@@ -77,27 +78,25 @@ def get_urgency_level(task: Task) -> str:
 
     today = date.today()
 
-    # Parse due date
-    due_date: Optional[date] = None
-    if task.due:
-        try:
-            due_date = datetime.strptime(task.due, "%Y-%m-%d").date()
-        except ValueError:
-            pass
+    # Parse due date (accepts "YYYY-MM-DD" or "YYYY-MM-DD HH:MM")
+    due_date: Optional[date] = parse_task_date(task.due)
 
-    # Parse start date
-    start_date: Optional[date] = None
-    if task.start:
-        try:
-            start_date = datetime.strptime(task.start, "%Y-%m-%d").date()
-        except ValueError:
-            pass
+    # Parse start date (same flexible format)
+    start_date: Optional[date] = parse_task_date(task.start)
 
     if due_date is not None:
         days_until_due = (due_date - today).days
         if days_until_due < 0:
             return URGENCY_OVERDUE
         elif days_until_due == 0:
+            # If the task has a precise due time today that has already
+            # passed, treat it as overdue rather than merely "due today"
+            # (TODOs.md Issue 5: precise-time awareness).
+            from taskmd.datetime_utils import parse_task_datetime, has_time_component
+            if has_time_component(task.due):
+                due_dt = parse_task_datetime(task.due)
+                if due_dt is not None and due_dt < datetime.now():
+                    return URGENCY_OVERDUE
             return URGENCY_DUE_TODAY
         elif days_until_due <= 3:
             return URGENCY_DUE_SOON

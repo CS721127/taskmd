@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from taskmd.models import Task
+from taskmd.id_utils import short_id
 from taskmd.ui.heatmap import (
     get_urgency_level, get_rich_style, get_urgency_icon,
     URGENCY_OVERDUE, URGENCY_DUE_TODAY,
@@ -90,7 +91,7 @@ def _format_task_row_rich(task: Task, show_section: bool = False) -> "Text":
     line.append(f"  {icon} ", style="dim")
     
     # Use short ID: t_01 -> 01
-    sid = task.id[2:] if task.id.startswith("t_") else task.id
+    sid = short_id(task.id)
     line.append(f"[{sid}] ", style="bright_blue")
     if pri_str:
         line.append(f"{pri_str:<5} ", style="bold red")
@@ -247,14 +248,16 @@ class RichDashboard:
                     left_group.append(_format_task_row_rich(task))
 
         # Right column: today's tasks
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        from taskmd.datetime_utils import parse_task_date
+        today_date = datetime.now().date()
         today_tasks = [
             t for t in all_tasks
-            if t.due == today_str and t.status != "[x]"
+            if parse_task_date(t.due) == today_date and t.status != "[x]"
         ]
         overdue_tasks = [
             t for t in all_tasks
-            if t.due and t.due < today_str and t.status != "[x]"
+            if t.due and parse_task_date(t.due) is not None
+            and parse_task_date(t.due) < today_date and t.status != "[x]"
         ]
 
         right_group = []
@@ -363,7 +366,7 @@ class RichDashboard:
                 style="magenta"
             )
 
-            sid = task.id[2:] if task.id.startswith("t_") else task.id
+            sid = short_id(task.id)
             row_data = [
                 f"{icon} {sid}",
                 pri_text,
@@ -424,7 +427,7 @@ class AnsiFallbackDashboard:
                     pri = ("★" * task.pri) if task.pri else ""
                     due = f"  📅{task.due}" if task.due else ""
                     tags = f"  [{','.join(task.tags)}]" if task.tags else ""
-                    sid = task.id[2:] if task.id.startswith("t_") else task.id
+                    sid = short_id(task.id)
                     print(
                         f"      {icon} \033[94m[{sid}]\033[0m "
                         f"{color}{status_sym} {task.name}\033[0m"
