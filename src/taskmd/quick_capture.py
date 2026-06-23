@@ -41,11 +41,12 @@ _RE_TAG = re.compile(r'#([\w\-]+)')
 # !priority  — !1 … !5, or bare !
 _RE_PRI = re.compile(r'!([1-5])?')
 
-# @date  — many shorthand forms (see _parse_date_token)
-_RE_DUE = re.compile(r'@([\w+\-]+)')
+# @date  — many shorthand forms (see _parse_date_token), optionally suffixed
+# with T-and-time for precise hour/minute (e.g. @tomorrowT14:30, @2026-06-25T09:00)
+_RE_DUE = re.compile(r'@([\w+\-]+(?:T\d{2}:\d{2})?)')
 
-# ^start-date
-_RE_START = re.compile(r'\^([\w+\-]+)')
+# ^start-date (same shorthand + optional T-time suffix as @)
+_RE_START = re.compile(r'\^([\w+\-]+(?:T\d{2}:\d{2})?)')
 
 # //subsection (must come before /section)
 _RE_SUB = re.compile(r'//([\w\s\-]+?)(?=\s|$|#|!|@|\^|/)')
@@ -86,7 +87,8 @@ class CaptureResult:
 
 def _parse_date_token(token: str) -> Optional[str]:
     """
-    Convert a date token string (without leading @ or ^) to YYYY-MM-DD.
+    Convert a date token string (without leading @ or ^) to YYYY-MM-DD,
+    or to "YYYY-MM-DD HH:MM" if a precise time was attached.
 
     Supported formats:
       today, tomorrow, yesterday
@@ -97,16 +99,27 @@ def _parse_date_token(token: str) -> Optional[str]:
       2-weeks   (= +14d)  (3-weeks... also supported)
       YYYY-MM-DD (literal ISO date)
       YYYY-MM-DD HH:MM (literal datetime)
+
+    Any of the above (including shorthands) may carry a "THH:MM" suffix to
+    attach a precise time, e.g. "tomorrowT14:30", "monT09:00", "+3dT08:15"
+    (TODOs.md Issue 5 — precise hour/minute due times).
     """
+    # Split off an optional "THH:MM" time suffix before resolving the date part.
+    time_suffix = ""
+    m_time = re.fullmatch(r'(.+)T(\d{2}:\d{2})', token)
+    if m_time:
+        token = m_time.group(1)
+        time_suffix = f" {m_time.group(2)}"
+
     today = date.today()
     token_lower = token.lower()
 
     if token_lower == "today":
-        return today.isoformat()
+        return today.isoformat() + time_suffix
     if token_lower == "tomorrow":
-        return (today + timedelta(days=1)).isoformat()
+        return (today + timedelta(days=1)).isoformat() + time_suffix
     if token_lower == "yesterday":
-        return (today - timedelta(days=1)).isoformat()
+        return (today - timedelta(days=1)).isoformat() + time_suffix
 
     # handle 'next-' prefix
     cleaned_token = token_lower.replace("next-", "")
@@ -117,26 +130,26 @@ def _parse_date_token(token: str) -> Optional[str]:
         days_ahead = (target_wd - today.weekday()) % 7
         if days_ahead == 0:
             days_ahead = 7  # always next occurrence, not today
-        return (today + timedelta(days=days_ahead)).isoformat()
+        return (today + timedelta(days=days_ahead)).isoformat() + time_suffix
 
     if token_lower == "next-week":
-        return (today + timedelta(days=7)).isoformat()
+        return (today + timedelta(days=7)).isoformat() + time_suffix
     
     # +Nd or -Nd  e.g. +3d, -5d
     m = re.fullmatch(r'([+-])?(\d+)d?', token_lower)
     if m:
         sign = -1 if m.group(1) == "-" else 1
-        return (today + timedelta(days=sign * int(m.group(2)))).isoformat()
+        return (today + timedelta(days=sign * int(m.group(2)))).isoformat() + time_suffix
     
     # N-weeks
     m = re.fullmatch(r'(\d+)-weeks?', token_lower)
     if m:
-        return (today + timedelta(days=int(m.group(1)) * 7)).isoformat()
+        return (today + timedelta(days=int(m.group(1)) * 7)).isoformat() + time_suffix
 
     # ISO date literal or datetime
     m = re.fullmatch(r'(\d{4}-\d{2}-\d{2})(\s+\d{2}:\d{2})?', token)
     if m:
-        return token # Return exactly as matched
+        return token + time_suffix  # Return exactly as matched (+ any T-time suffix)
 
     return None
 
