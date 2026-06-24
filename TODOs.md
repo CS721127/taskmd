@@ -4,7 +4,8 @@
 
 ## 第一部分：常规问题修复 (General Issues)
 
-### Issue 4: dashboard -live应该可以调出一个控制面板，有UI界面的而不是仅仅CLI，dashboard改为dashboard cli
+### Issue 4: dashboard -live 
+功能需要添加；作为controlboard，应当在UI界面存在大部分tm指令功能，比如在命令添加的基础上可以回车创建新任务，修改priority，可以一键archive，delete已完成的任务，clear等等其他的tm基本指令的功能，要求用户在使用UI界面时所获得的功能和CLI没有任何区别。
 
 ### Issue 6:
 当用户使用tm open直接编辑md文件时，程序不能解析如果用户未按照最标准的储存格式进行编辑。程序应当可以智能解析，检测标准的和不标准的，如是不标准的，如使用 - 而不是 - [ ] 时程序应当也可以解析该内容并写入正确格式当运行时
