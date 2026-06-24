@@ -176,10 +176,16 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
      Dates:  @today @tomorrow @mon…@sun @+Nd YYYY-MM-DD
      Precise time: append T HH:MM to any date token, e.g. @tomorrowT14:30
 
- \033[1mDashboard & UI\033[0m   (Phase 5 — requires: pip install 'taskmd[ui]')
-   tm dashboard                              Rich dashboard view
-   tm dashboard --live                       Live-reload dashboard (auto-refresh on save)
-   tm dashboard --progress                   Section progress bars only
+ \033[1mDashboard\033[0m   (Phase 5 — terminal mode benefits from: pip install 'taskmd[ui]')
+   tm dashboard                              Terminal dashboard (same as "dashboard cli")
+   tm dashboard cli                          Terminal dashboard, explicit
+   tm dashboard cli --watch                  Terminal dashboard, auto-refresh on file save
+   tm dashboard cli --progress               Section progress bars only
+   tm dashboard web   (or: --live)           Open the browser control panel — a real UI,
+                                              not just text. Click checkboxes, edit due
+                                              dates/priority inline, add tasks — every
+                                              change writes straight back to your .md file.
+                                              [--port N] [--no-browser]
 
  \033[1mExport\033[0m   (Phase 8)
    tm export csv    [--output f.csv]         Export to CSV
@@ -341,11 +347,23 @@ def get_parser(interactive=False):
     p_migrate = subparsers.add_parser("migrate")
     p_migrate.add_argument("migrate_type", choices=["txt-to-md"])
 
-    # ─ dashboard (Phase 5) ─
+    # ─ dashboard (Phase 5; Issue 4: dashboard -> dashboard cli, --live -> web panel) ─
     p_dashboard = subparsers.add_parser("dashboard")
-    p_dashboard.add_argument("--live", action="store_true", help="Enable live reload mode")
-    p_dashboard.add_argument("--wide", action="store_true", help="Force dual-column layout")
-    p_dashboard.add_argument("--progress", action="store_true", help="Show section progress bars only")
+    p_dashboard.add_argument(
+        "mode", nargs="?", default=None, choices=["cli", "web"],
+        help="'cli' for the terminal dashboard (default), 'web' to launch the browser control panel"
+    )
+    p_dashboard.add_argument(
+        "--live", action="store_true",
+        help="Launch the browser-based control panel (same as 'tm dashboard web')"
+    )
+    p_dashboard.add_argument("--watch", action="store_true",
+                              help="With 'cli': auto-refresh the terminal view when tasks.md changes")
+    p_dashboard.add_argument("--wide", action="store_true", help="Force dual-column layout (cli mode)")
+    p_dashboard.add_argument("--progress", action="store_true", help="Show section progress bars only (cli mode)")
+    p_dashboard.add_argument("--port", type=int, default=None, help="Port for the web control panel")
+    p_dashboard.add_argument("--no-browser", action="store_true",
+                              help="Don't auto-open a browser tab for the web control panel")
 
     # ─ export (Phase 8) ─
     p_export = subparsers.add_parser("export")
@@ -965,20 +983,39 @@ def handle_args(args, service, config, parser):
 # ─── Phase 5: Dashboard Handler ──────────────────────────────────────────────
 
 def _handle_dashboard(args, service, config):
-    """Handle the `tm dashboard` command."""
+    """Handle the `tm dashboard [cli|web]` command (TODOs.md Issue 4).
+
+    - `tm dashboard` / `tm dashboard cli`  → terminal dashboard (Rich, or ANSI
+      fallback). Add --watch to auto-refresh in place when tasks.md changes
+      (this is the old `--live` terminal behaviour, renamed since --live now
+      means the browser control panel).
+    - `tm dashboard web` / `tm dashboard --live` → launches a real browser-based
+      control panel (works with zero extra dependencies — stdlib only).
+    """
+    web_requested = (getattr(args, "mode", None) == "web") or getattr(args, "live", False)
+
+    if web_requested:
+        from taskmd.ui.webpanel import run_web_panel
+        run_web_panel(
+            service,
+            port=getattr(args, "port", None),
+            open_browser=not getattr(args, "no_browser", False),
+        )
+        return
+
+    # ── CLI (terminal) dashboard ───────────────────────────────────────────
     from taskmd.ui.dashboard import get_dashboard, RICH_AVAILABLE
 
     tasks = service.get_all_tasks()
     stats = service.get_stats()
     dashboard = get_dashboard()
 
-    if hasattr(args, "progress") and args.progress:
+    if getattr(args, "progress", False):
         dashboard.render_section_progress(tasks)
         return
 
-    if hasattr(args, "live") and args.live:
-        # Live reload mode
-        from taskmd.ui.live import run_live_dashboard, WATCHDOG_AVAILABLE
+    if getattr(args, "watch", False):
+        from taskmd.ui.live import run_live_dashboard
 
         if not RICH_AVAILABLE:
             print("\033[93m[WARN] rich not installed. Using ANSI fallback.\033[0m")
@@ -988,18 +1025,12 @@ def _handle_dashboard(args, service, config):
             tasks = service.get_all_tasks()
             stats = service.get_stats()
             if RICH_AVAILABLE:
-                from rich.console import Group
-                from io import StringIO
-                # Build renderable layout
-                from taskmd.ui.dashboard import RichDashboard
-                d = RichDashboard()
-                # Return a simple renderable for live mode
                 from rich.panel import Panel
-                from rich.text import Text
-                from taskmd.ui.dashboard import _group_by_section, _section_progress, _make_progress_bar, _format_task_row_rich
                 from rich.console import Console
                 from io import StringIO
+                from taskmd.ui.dashboard import RichDashboard
 
+                d = RichDashboard()
                 buf = Console(file=StringIO(), highlight=False)
                 d.console = buf
                 d.render_full(tasks, stats)
@@ -1008,7 +1039,6 @@ def _handle_dashboard(args, service, config):
                 dashboard.render_full(tasks, stats)
 
         if RICH_AVAILABLE:
-            from taskmd.ui.live import run_live_dashboard
             run_live_dashboard(config.task_file, render_fn)
         else:
             import os, time
@@ -1030,8 +1060,9 @@ def _handle_dashboard(args, service, config):
                         dashboard.render_full(tasks, stats)
             except KeyboardInterrupt:
                 print("\nDashboard closed.")
-    else:
-        dashboard.render_full(tasks, stats)
+        return
+
+    dashboard.render_full(tasks, stats)
 
 
 # ─── Phase 8: Export Handler ──────────────────────────────────────────────────
