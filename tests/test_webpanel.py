@@ -215,10 +215,12 @@ class TestPanelHTML:
         assert "/api/state" in PANEL_HTML
         assert "/api/tasks" in PANEL_HTML
 
-    def test_html_grid_has_six_columns_for_six_row_children(self):
+    def test_html_grid_has_seven_columns_for_seven_row_children(self):
         # Regression guard for the column/child-count mismatch bug found
         # during visual testing (priority stars wrapped onto their own line).
-        assert "grid-template-columns: 22px 30px 1fr auto auto auto;" in PANEL_HTML
+        # Updated to 7 columns when the per-row action-menu button (⋮) was
+        # added for full CLI parity (move/tag/delete from the row itself).
+        assert "grid-template-columns: 22px 30px 1fr auto auto auto 20px;" in PANEL_HTML
 
 
 # ─── CLI integration ─────────────────────────────────────────────────────────
@@ -294,3 +296,211 @@ class TestDashboardCLIDispatch:
         result = run_tm(["help"], dash_env)
         assert "dashboard cli" in result.stdout
         assert "dashboard web" in result.stdout
+
+
+# ─── Full CLI parity: quick-capture add, tags, move, bulk ops, search, validate
+
+class TestPanelAddWithQuickCapture:
+    """The 'press Enter to create' box must support the same grammar as
+    `tm add "..."` on the command line — not just a bare name."""
+
+    def test_add_extracts_tag_and_due(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Call dentist #health @tomorrow"})
+        assert status == 200
+        t = next(x for x in data["tasks"] if x["name"] == "Call dentist")
+        assert t["tags"] == ["health"]
+        assert t["due"] is not None
+
+    def test_add_extracts_priority(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Submit report !4 @2026-07-01"})
+        t = next(x for x in data["tasks"] if x["name"] == "Submit report")
+        assert t["pri"] == 4
+
+    def test_add_relocates_via_section_subsection_tokens(self, panel_server):
+        status, data = http_json(
+            panel_server + "api/tasks",
+            {"name": "Buy stamps #errand @tomorrow /Personal //Shopping"},
+        )
+        t = next(x for x in data["tasks"] if x["name"] == "Buy stamps")
+        assert t["section"] == "Personal"
+        assert t["sub"] == "Shopping"
+
+    def test_add_false_positive_guard_issue_number_not_a_tag(self, panel_server):
+        """Mirrors the parser-level guard: '#1234' in a name without a
+        strong @/^ date signal must not be treated as a tag."""
+        status, data = http_json(panel_server + "api/tasks", {"name": "Fix bug #1234"})
+        t = next(x for x in data["tasks"] if "Fix bug" in x["name"])
+        assert t["tags"] == [] or t["tags"] is None or "1234" not in (t["tags"] or [])
+
+    def test_add_response_includes_capture_warnings_key(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Plain task, no tokens"})
+        assert "capture_warnings" in data
+
+    def test_explicit_body_fields_still_work_without_shortcut_tokens(self, panel_server):
+        status, data = http_json(
+            panel_server + "api/tasks",
+            {"name": "Quarterly review", "section": "Work", "sub": "Reviews", "pri": 2},
+        )
+        t = next(x for x in data["tasks"] if x["name"] == "Quarterly review")
+        assert t["section"] == "Work"
+        assert t["sub"] == "Reviews"
+        assert t["pri"] == 2
+
+
+class TestPanelTagOperations:
+    def test_add_tag(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_04/tags", {"action": "add", "tag": "urgent"})
+        assert status == 200
+        t04 = next(t for t in data["tasks"] if t["id"] == "t_04")
+        assert "urgent" in t04["tags"]
+
+    def test_remove_tag(self, panel_server):
+        http_json(panel_server + "api/tasks/t_01/tags", {"action": "add", "tag": "extra"})
+        status, data = http_json(panel_server + "api/tasks/t_01/tags", {"action": "rm", "tag": "work"})
+        t01 = next(t for t in data["tasks"] if t["id"] == "t_01")
+        assert "work" not in t01["tags"]
+
+    def test_tag_action_requires_valid_action(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_01/tags", {"action": "bogus", "tag": "x"})
+        assert status == 400
+
+    def test_tag_action_requires_nonempty_tag(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_01/tags", {"action": "add", "tag": ""})
+        assert status == 400
+
+    def test_tag_unknown_task_404(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_99/tags", {"action": "add", "tag": "x"})
+        assert status == 404
+
+
+class TestPanelMoveOperation:
+    def test_move_to_new_section_and_sub(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_03/move", {"section": "Life", "sub": "Chores"})
+        assert status == 200
+        t03 = next(t for t in data["tasks"] if t["id"] == "t_03")
+        assert t03["section"] == "Life"
+        assert t03["sub"] == "Chores"
+
+    def test_move_section_only(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_04/move", {"section": "Work"})
+        t04 = next(t for t in data["tasks"] if t["id"] == "t_04")
+        assert t04["section"] == "Work"
+
+    def test_move_requires_section_or_sub(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_04/move", {})
+        assert status == 400
+
+    def test_move_unknown_task_404(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_99/move", {"section": "X"})
+        assert status == 404
+
+    def test_move_persists_to_file(self, panel_service, panel_server):
+        http_json(panel_server + "api/tasks/t_03/move", {"section": "Life", "sub": "Chores"})
+        content = panel_service.repo.file_path.read_text(encoding="utf-8")
+        assert "# Life" in content
+        assert "## Chores" in content
+
+
+class TestPanelPriorityClearing:
+    """Regression test for a bug found while wiring the priority editor:
+    set_metadata('pri', None) silently no-op'd instead of clearing it."""
+
+    def test_set_priority(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_04/field", {"field": "pri", "value": 5})
+        t04 = next(t for t in data["tasks"] if t["id"] == "t_04")
+        assert t04["pri"] == 5
+
+    def test_clear_priority_with_none(self, panel_server):
+        http_json(panel_server + "api/tasks/t_01/field", {"field": "pri", "value": 5})
+        status, data = http_json(panel_server + "api/tasks/t_01/field", {"field": "pri", "value": None})
+        t01 = next(t for t in data["tasks"] if t["id"] == "t_01")
+        assert t01["pri"] is None
+
+    def test_clear_priority_with_empty_string(self, panel_server):
+        http_json(panel_server + "api/tasks/t_01/field", {"field": "pri", "value": 5})
+        status, data = http_json(panel_server + "api/tasks/t_01/field", {"field": "pri", "value": ""})
+        t01 = next(t for t in data["tasks"] if t["id"] == "t_01")
+        assert t01["pri"] is None
+
+    def test_set_priority_zero_is_distinct_from_clearing(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks/t_04/field", {"field": "pri", "value": "0"})
+        t04 = next(t for t in data["tasks"] if t["id"] == "t_04")
+        assert t04["pri"] == 0
+
+
+class TestPanelBulkOperations:
+    def test_rm_done_removes_completed_tasks(self, panel_server):
+        status, data = http_json(panel_server + "api/bulk/rm_done", {})
+        assert status == 200
+        assert data["removed_count"] == 1
+        assert not any(t["id"] == "t_02" for t in data["tasks"])
+
+    def test_rm_done_zero_when_nothing_completed(self, panel_server):
+        http_json(panel_server + "api/bulk/rm_done", {})
+        status, data = http_json(panel_server + "api/bulk/rm_done", {})
+        assert data["removed_count"] == 0
+
+    def test_archive_moves_completed_tasks(self, panel_service, panel_server):
+        status, data = http_json(panel_server + "api/bulk/archive", {})
+        assert status == 200
+        assert data["archived_count"] == 1
+        assert not any(t["id"] == "t_02" for t in data["tasks"])
+
+    def test_clear_requires_confirmation(self, panel_server):
+        status, data = http_json(panel_server + "api/bulk/clear", {})
+        assert status == 400
+        assert "confirmation" in data["error"]
+
+    def test_clear_with_confirmation_removes_everything(self, panel_server):
+        status, data = http_json(panel_server + "api/bulk/clear", {"confirm": True})
+        assert status == 200
+        assert len(data["tasks"]) == 0
+
+    def test_clear_persists_empty_state_to_file(self, panel_service, panel_server):
+        http_json(panel_server + "api/bulk/clear", {"confirm": True})
+        content = panel_service.repo.file_path.read_text(encoding="utf-8")
+        assert "- [" not in content
+
+
+class TestPanelValidateRoute:
+    def test_validate_clean_file(self, panel_server):
+        status, body = http_get(panel_server + "api/validate")
+        data = json.loads(body)
+        assert "errors" in data
+
+    def test_validate_reports_lenient_format_issue(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text("<!-- taskmd:version=2 -->\n\n# Work\n## Tasks\n- Buy milk\n", encoding="utf-8")
+        service = TaskService(TaskRepository(f))
+        httpd, thread, url = start_web_panel_background(service)
+        time.sleep(0.2)
+        try:
+            status, body = http_get(url + "api/validate")
+            data = json.loads(body)
+            assert any("non-standard" in e for e in data["errors"])
+        finally:
+            httpd.shutdown()
+
+
+class TestPanelSearchRoute:
+    def test_search_finds_matching_task(self, panel_server):
+        status, body = http_get(panel_server + "api/search?q=report")
+        data = json.loads(body)
+        assert any("report" in r["name"].lower() for r in data["results"])
+
+    def test_search_empty_query_returns_empty(self, panel_server):
+        status, body = http_get(panel_server + "api/search?q=")
+        data = json.loads(body)
+        assert data["results"] == []
+
+    def test_search_no_match_returns_empty_list(self, panel_server):
+        status, body = http_get(panel_server + "api/search?q=zzzznomatch")
+        data = json.loads(body)
+        assert data["results"] == []
+
+
+class TestPanelPayloadIncludesTags:
+    def test_payload_has_tags_summary(self, panel_service):
+        payload = _build_payload(panel_service)
+        assert "tags" in payload
+        assert payload["tags"].get("work") == 1
