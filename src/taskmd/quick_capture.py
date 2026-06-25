@@ -201,12 +201,16 @@ def parse_quick_capture(text: str) -> CaptureResult:
             new_str = new_str[:match.start()] + (" " if match.start() > 0 and match.end() < len(new_str) else "") + new_str[match.end():]
         return vals, new_str.strip()
 
-    # Subsections first (longest tokens)
-    subs, s = extract_token(re.compile(r'//[\w\s\-]+?'), s)
+    # Subsections first (longest tokens). Requires the section/sub name to
+    # start immediately after the slash(es) with no space — "//Shopping" is
+    # a token, but "rent / utilities" (space after the slash) is ordinary
+    # prose and must not be mistaken for one (same false-positive concern as
+    # TODOs.md Issue 6).
+    subs, s = extract_token(re.compile(r'//[\w\-][\w\s\-]*?'), s)
     if subs: result.sub = subs[-1].lstrip('/')
 
-    # Sections 
-    secs, s = extract_token(re.compile(r'/[\w\s\-]+?'), s)
+    # Sections
+    secs, s = extract_token(re.compile(r'/[\w\-][\w\s\-]*?'), s)
     if secs: result.section = secs[-1].lstrip('/')
 
     # Start dates
@@ -229,8 +233,15 @@ def parse_quick_capture(text: str) -> CaptureResult:
         p = pris[-1][1:] # Remove !
         result.pri = int(p) if p else 1
 
-    # Tags (can have multiple)
-    tags, s = extract_token(re.compile(r'#[\w\-]+'), s)
+    # Tags (can have multiple). A purely-numeric token (e.g. "#1234") is
+    # treated as an issue/PR/ticket reference rather than a tag — nobody
+    # meaningfully tags a task "#1234", but "Fix bug #1234" is an extremely
+    # common way to reference an issue number, and silently renaming the
+    # task + inventing a "1234" tag would corrupt the name (see TODOs.md
+    # Issue 6's false-positive guard, applied here too since `tm add` and
+    # the web panel share this same extraction code). The negative lookahead
+    # requires at least one non-digit character somewhere in the token.
+    tags, s = extract_token(re.compile(r'#(?!\d+(?:\s|$))[\w\-]+'), s)
     if tags:
         result.tags.extend([t[1:].lower() for t in tags])
 

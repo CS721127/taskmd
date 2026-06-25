@@ -3,14 +3,9 @@
 ---
 
 ## 第一部分：常规问题修复 (General Issues)
+- dashboard live 应当添加按钮可以直接add section， add任务等等；当用户处在任务内容编辑中时，如果进行会车，应当自动创建同section下的新任务；如在编辑section时会车，应当创建新的section（同等级创建）；如shift + enter 为new line
+- 
 
-### Issue 4: dashboard -live 
-功能需要添加；作为controlboard，应当在UI界面存在大部分tm指令功能，比如在命令添加的基础上可以回车创建新任务，修改priority，可以一键archive，delete已完成的任务，clear等等其他的tm基本指令的功能，要求用户在使用UI界面时所获得的功能和CLI没有任何区别。
-
-### Issue 6:
-当用户使用tm open直接编辑md文件时，程序不能解析如果用户未按照最标准的储存格式进行编辑。程序应当可以智能解析，检测标准的和不标准的，如是不标准的，如使用 - 而不是 - [ ] 时程序应当也可以解析该内容并写入正确格式当运行时
-同时程序应当可以识别写在md文件里的快捷方式（正如add的快捷方式一样，如果包含了subssection，section等元素，程序在运行时应当将他们放回他们所属于的section位置-这要求程序可以识别这些不同的格式）
-同时，不属于任何一种的格式在validate时应当有显示。
 
 ## 第二部分：Phase 9-15 补全 (Feature Completion)
 ## Phase 9：主题与审美完成度（Themes & Aesthetic Polish）

@@ -11,11 +11,18 @@ Implemented entirely with the Python standard library (`http.server`,
 extras — anyone running `tm dashboard --live` gets a real GUI, no extra
 installs required.
 
-The panel is a genuine *control* panel, not a read-only viewer: clicking
-a task's checkbox cycles its status, due dates and priorities are
-editable inline, and new tasks can be added — every action writes
-straight back through TaskService into the same tasks.md file the CLI
-uses, so the markdown file and the browser stay in sync either direction.
+Full CLI parity (Issue 4 follow-up): the panel exposes essentially every
+day-to-day `tm` operation, not just status/due editing —
+  - Add a task with full quick-capture syntax (#tag !pri @due /section //sub)
+  - Edit name, due, start, priority, reminder note inline
+  - Add/remove individual tags
+  - Move a task to a different section/subsection
+  - Delete a single task
+  - Bulk: delete all completed, archive all completed, clear everything
+  - Search by keyword, browse/filter by tag
+  - Validate the file and see any formatting warnings
+So a person using the browser panel gets the same capabilities as the
+CLI, not a reduced subset.
 """
 from __future__ import annotations
 
@@ -52,7 +59,7 @@ def _task_to_dict(task: Task) -> dict:
 
 
 def _build_payload(service) -> dict:
-    """Build the full {tasks, stats, sections} snapshot sent to the browser."""
+    """Build the full {tasks, stats, sections, tags} snapshot sent to the browser."""
     tasks = service.get_all_tasks()
     stats = service.get_stats()
 
@@ -65,6 +72,7 @@ def _build_payload(service) -> dict:
     return {
         "tasks": [_task_to_dict(t) for t in tasks],
         "sections": sections,
+        "tags": service.get_all_tags(),
         "stats": {
             "total": stats.get("total", 0),
             "done": stats.get("done", 0),
@@ -131,11 +139,29 @@ def make_handler(service, html_content: str):
         # ── routes ───────────────────────────────────────────────────────
         def do_GET(self):
             parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+
             if parsed.path in ("/", "/index.html"):
                 self._send_html(html_content)
             elif parsed.path == "/api/state":
                 try:
                     self._send_json(_build_payload(service))
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+            elif parsed.path == "/api/validate":
+                try:
+                    errors = service.validate()
+                    self._send_json({"errors": errors})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+            elif parsed.path == "/api/search":
+                try:
+                    keyword = (qs.get("q") or [""])[0]
+                    if not keyword.strip():
+                        self._send_json({"results": []})
+                        return
+                    results = service.search(keyword)
+                    self._send_json({"results": [_task_to_dict(t) for t in results]})
                 except Exception as e:
                     self._send_json({"error": str(e)}, status=500)
             else:
@@ -148,21 +174,35 @@ def make_handler(service, html_content: str):
             body = self._read_json_body()
 
             try:
-                # /api/tasks  → add a new task
+                # /api/tasks  → add a new task, with full quick-capture support
+                # (#tag !pri @due ^start /section //sub [note]) so the panel's
+                # "press Enter to create" box has the exact same grammar as
+                # `tm add "..."` on the command line.
                 if parsed.path == "/api/tasks":
-                    name = (body.get("name") or "").strip()
-                    if not name:
+                    raw_name = (body.get("name") or "").strip()
+                    if not raw_name:
                         self._send_json({"error": "name is required"}, status=400)
                         return
+
+                    from taskmd.quick_capture import parse_quick_capture
+                    cap = parse_quick_capture(raw_name)
+
+                    explicit_tags = body.get("tags")
+                    tags = explicit_tags if explicit_tags else (cap.tags or None)
+
                     service.add_task(
-                        name=name,
-                        section=body.get("section") or "Uncategorized",
-                        sub=body.get("sub") or "General",
-                        due=body.get("due") or None,
-                        pri=body.get("pri") or None,
-                        tags=body.get("tags") or None,
+                        name=cap.name if cap.name else raw_name,
+                        section=body.get("section") or cap.section or "Uncategorized",
+                        sub=body.get("sub") or cap.sub or "General",
+                        due=body.get("due") or cap.due or None,
+                        start=body.get("start") or cap.start or None,
+                        pri=body.get("pri") if body.get("pri") is not None else cap.pri,
+                        tags=tags,
+                        rem=body.get("rem") or cap.rem or None,
                     )
-                    self._send_json(_build_payload(service))
+                    payload = _build_payload(service)
+                    payload["capture_warnings"] = cap.warnings
+                    self._send_json(payload)
                     return
 
                 # /api/tasks/<id>/status  → cycle or set status
@@ -181,10 +221,60 @@ def make_handler(service, html_content: str):
                     task_id = parts[2]
                     field_name = body.get("field")
                     value = body.get("value")
-                    if field_name not in ("due", "start", "rem", "pri", "name"):
+                    if field_name not in ("due", "start", "rem", "pri", "name", "course", "weight", "recur", "est", "loc"):
                         self._send_json({"error": "field not editable from panel"}, status=400)
                         return
                     service.set_metadata(task_id, field_name, value)
+                    self._send_json(_build_payload(service))
+                    return
+
+                # /api/tasks/<id>/tags  → add or remove a single tag
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "tasks" and parts[3] == "tags":
+                    task_id = parts[2]
+                    action = body.get("action")
+                    tag = (body.get("tag") or "").strip()
+                    if action not in ("add", "rm") or not tag:
+                        self._send_json({"error": "action ('add'/'rm') and tag are required"}, status=400)
+                        return
+                    service.set_tags(task_id, action, tag)
+                    self._send_json(_build_payload(service))
+                    return
+
+                # /api/tasks/<id>/move  → move to a different section/subsection
+                if len(parts) == 4 and parts[0] == "api" and parts[1] == "tasks" and parts[3] == "move":
+                    task_id = parts[2]
+                    section = body.get("section") or None
+                    sub = body.get("sub") or None
+                    if not section and not sub:
+                        self._send_json({"error": "section and/or sub is required"}, status=400)
+                        return
+                    service.move_task(task_id, section=section, sub=sub)
+                    self._send_json(_build_payload(service))
+                    return
+
+                # ── Bulk operations (toolbar actions) ──────────────────────
+                if parsed.path == "/api/bulk/rm_done":
+                    removed = service.remove_done()
+                    payload = _build_payload(service)
+                    payload["removed_count"] = removed
+                    self._send_json(payload)
+                    return
+
+                if parsed.path == "/api/bulk/archive":
+                    archived = service.archive_done()
+                    payload = _build_payload(service)
+                    payload["archived_count"] = archived
+                    self._send_json(payload)
+                    return
+
+                if parsed.path == "/api/bulk/clear":
+                    # Confirmation happens in the browser UI (there's no TTY
+                    # prompt to fall back to here) — the panel must show its
+                    # own confirm dialog before calling this endpoint.
+                    if not body.get("confirm"):
+                        self._send_json({"error": "confirmation required"}, status=400)
+                        return
+                    service.clear_all()
                     self._send_json(_build_payload(service))
                     return
 

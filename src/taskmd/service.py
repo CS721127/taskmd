@@ -366,19 +366,25 @@ class TaskService:
         elif field_name == "rem":
             task.rem = value
         elif field_name == "pri":
-            try:
-                task.pri = int(value)
-            except (ValueError, TypeError):
-                pass
+            if value in (None, "", "0"):
+                task.pri = None if value != "0" else 0
+            else:
+                try:
+                    task.pri = int(value)
+                except (ValueError, TypeError):
+                    pass
         elif field_name == "name":
             task.name = value
         elif field_name == "course":
             task.course = value
         elif field_name == "weight":
-            try:
-                task.weight = int(value)
-            except (ValueError, TypeError):
-                pass
+            if value in (None, ""):
+                task.weight = None
+            else:
+                try:
+                    task.weight = int(value)
+                except (ValueError, TypeError):
+                    pass
         elif field_name == "recur":
             task.recur = value
         elif field_name == "est":

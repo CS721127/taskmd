@@ -152,9 +152,14 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm search <keyword>                       Search tasks
 
  \033[1mFile & System\033[0m
-   tm open                                   Open tasks.md in editor
+   tm open                                   Open tasks.md in editor — feel free to
+                                              edit by hand; non-standard formatting
+                                              and #tag/!pri/@due-style shortcuts
+                                              are recognized and normalized later
    tm validate                               Check file for errors
-   tm reload                                 Reload and repair IDs
+   tm reload                                 Reload, repairing IDs and normalizing
+                                              any non-standard task formatting
+                                              (see "tm open" — hand edits welcome)
    tm archive                                Archive completed tasks
    tm config show                            Show current config
    tm config edit                            Open config file in editor
@@ -181,10 +186,18 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm dashboard cli                          Terminal dashboard, explicit
    tm dashboard cli --watch                  Terminal dashboard, auto-refresh on file save
    tm dashboard cli --progress               Section progress bars only
-   tm dashboard web   (or: --live)           Open the browser control panel — a real UI,
-                                              not just text. Click checkboxes, edit due
-                                              dates/priority inline, add tasks — every
-                                              change writes straight back to your .md file.
+   tm dashboard web   (or: --live)           Open the browser control panel — full feature
+                                              parity with the CLI, not a reduced view:
+                                                - add tasks (Enter = same quick-capture
+                                                  grammar as "tm add", incl. #tag !pri
+                                                  @due /section //sub)
+                                                - click checkbox to cycle status
+                                                - edit name, due, priority, tags inline
+                                                - move a task to another section/sub
+                                                - delete a single task
+                                                - bulk: delete all done, archive done,
+                                                  clear everything (with confirmation)
+                                                - search, filter by tag, validate the file
                                               [--port N] [--no-browser]
 
  \033[1mExport\033[0m   (Phase 8)
