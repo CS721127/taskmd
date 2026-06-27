@@ -103,9 +103,17 @@ class TestUrgencyPrecision:
         assert get_urgency_level(t) == URGENCY_DUE_TODAY
 
     def test_due_today_with_future_time_is_due_today(self):
-        future = datetime.now() + timedelta(hours=2)
-        due = future.strftime("%Y-%m-%d %H:%M")
+        # Anchored to a fixed time-of-day (noon) rather than "now + 2h", which
+        # can roll over past midnight and flip this into tomorrow depending on
+        # what time the suite happens to run.
+        today = date.today()
+        due = f"{today.isoformat()} 23:59"
         t = Task(name="x", section="S", sub="B", status="[ ]", due=due)
+        # If "now" is already past 23:59 today (i.e. essentially midnight),
+        # this is inherently untestable as "due later today" — skip that
+        # vanishingly small window rather than asserting something false.
+        if datetime.now().strftime("%H:%M") >= "23:59":
+            pytest.skip("running too close to midnight for a same-day future-time fixture")
         assert get_urgency_level(t) == URGENCY_DUE_TODAY
 
     def test_due_today_with_past_time_is_overdue(self):
@@ -171,7 +179,13 @@ class TestServicePrecision:
         from taskmd.repository import TaskRepository
         from taskmd.service import TaskService
 
-        past_time = (datetime.now() - timedelta(hours=1)).strftime("%H:%M")
+        # Anchored to a fixed early-morning time rather than "now - 1h",
+        # which can roll back across midnight (giving a time that's
+        # actually later today, not earlier) depending on when the suite
+        # runs. 00:01 is safely in the past for any time-of-day after it.
+        if datetime.now().strftime("%H:%M") <= "00:01":
+            pytest.skip("running too close to midnight for a same-day past-time fixture")
+        past_time = "00:01"
         today = date.today().isoformat()
         content = (
             "<!-- taskmd:version=2 -->\n\n"
@@ -188,7 +202,11 @@ class TestServicePrecision:
         from taskmd.repository import TaskRepository
         from taskmd.service import TaskService
 
-        future_time = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+        # Anchored to a fixed end-of-day time rather than "now + 2h", which
+        # can roll over past midnight depending on when the suite runs.
+        if datetime.now().strftime("%H:%M") >= "23:59":
+            pytest.skip("running too close to midnight for a same-day future-time fixture")
+        future_time = "23:59"
         today = date.today().isoformat()
         content = (
             "<!-- taskmd:version=2 -->\n\n"
