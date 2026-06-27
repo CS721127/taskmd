@@ -3,11 +3,24 @@
 ---
 
 ## 第一部分：常规问题修复 (General Issues)
-- dashboard live 应当添加按钮可以直接add section， add任务等等；当用户处在任务内容编辑中时，如果进行会车，应当自动创建同section下的新任务；如在编辑section时会车，应当创建新的section（同等级创建）；如shift + enter 为new line
-- 
+### dashboard live
+- 应当可以删除subsection和section
+-  dashboard时搜索的结果按照原来的section分类，不要去掉section只显示task name
+-  refresh 不要影响用户，当用户鼠标到task并且task背景变深后就应当进入editing模式;
+-  应当可以排序按照priority等
+-  for doing enter to change to add a new task under same section, the new task should be added directly under the editing task, not at the end of the section. 
+-  when enter and created new task, altomatically move the mouse to edit the new task
+- due日期有日历UI选择时间，下方是时间转盘
+- 可以批量操作，比如添加tag，添加priority，due date； 执行删除，done，等等
+- 用户Enter时应当保存现有更改，不应该直接退出（现在有的时候修改的没有被保存上）
+### CLI
+- tm sort 有bug且 和 tm list --sort 功能一样，留一个，简化输入
+- sort 如果输入-pd应当先按照priority排再按d排....
 
 
 ## 第二部分：Phase 9-15 补全 (Feature Completion)
+## Phase +1 鼓励机制动画
+- 制作一个鼓励机制，可以自己设置与打开，当设置后当完成到一定百分比有烟花等等界面特效恭喜再接再厉
 ## Phase 9：主题与审美完成度（Themes & Aesthetic Polish）
 
 ### 目标
