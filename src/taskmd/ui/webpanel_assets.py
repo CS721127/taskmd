@@ -116,8 +116,13 @@ main {
 .section-header:first-child { margin-top: 12px; }
 
 .section-header .hash { color: var(--amber); font-weight: 700; }
-.section-header .name { font-weight: 700; font-size: 16px; letter-spacing: 0.2px; }
+.section-header .name {
+  font-weight: 700; font-size: 16px; letter-spacing: 0.2px;
+  outline: none; border-radius: 3px; padding: 0 3px; cursor: text;
+}
+.section-header .name:focus { background: #fff; box-shadow: 0 0 0 1px var(--focus); }
 .section-header .progress { color: var(--ink-faint); font-size: 12px; }
+.section-header .add-sub-link { margin-left: auto; }
 .section-rule { border: none; border-top: 1px solid var(--rule); margin: 6px 0 10px; }
 
 .sub-header {
@@ -129,7 +134,41 @@ main {
   font-size: 13px;
 }
 .sub-header .hash { color: var(--ink-faint); }
-.sub-header .name { font-weight: 600; }
+.sub-header .name {
+  font-weight: 600;
+  outline: none; border-radius: 3px; padding: 0 3px; cursor: text;
+}
+.sub-header .name:focus { background: #fff; box-shadow: 0 0 0 1px var(--focus); }
+.sub-header .add-task-link { margin-left: auto; }
+
+.add-inline-link {
+  font-size: 11px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+.add-inline-link:hover { color: var(--teal); opacity: 1; }
+.section-block:hover .add-inline-link,
+.sub-block:hover .add-inline-link { opacity: 1; }
+
+.empty-sub-placeholder {
+  margin: 2px 0 4px 36px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.add-task-row {
+  margin: 1px 0;
+  padding: 3px 8px 3px 36px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sub-block:hover .add-task-row { opacity: 0.8; }
+.add-task-row:hover { color: var(--teal); opacity: 1; }
 
 .toolbar {
   margin-top: 10px;
@@ -179,6 +218,8 @@ main {
 .tb-btn:hover { background: var(--paper-raised); color: var(--ink); }
 .tb-btn.danger:hover { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .tb-btn.tag-filter-active { background: var(--teal); color: #fff; border-color: var(--teal); }
+.tb-btn.primary { background: var(--teal); color: #fff; border-color: var(--teal); }
+.tb-btn.primary:hover { background: var(--focus); color: #fff; }
 
 .search-results {
   margin: 14px 0 24px;
@@ -486,6 +527,7 @@ main {
     <div class="search-wrap">
       <input type="search" id="search-input" placeholder="Search name, tag, section, note&hellip;">
     </div>
+    <button class="tb-btn primary" id="btn-add-section" title="Create a new top-level section">+ Section</button>
     <button class="tb-btn" id="btn-validate" title="Check the file for formatting issues">Validate</button>
     <button class="tb-btn" id="btn-archive" title="Move all completed tasks to the archive file">Archive done</button>
     <button class="tb-btn danger" id="btn-rmdone" title="Delete all completed tasks">Delete done</button>
@@ -518,19 +560,53 @@ const STATUS_CYCLE = { "[ ]": "[-]", "[-]": "[x]", "[x]": "[ ]" };
 const STATUS_GLYPH  = { "[ ]": "\u2610", "[-]": "\u25D0", "[x]": "\u2611" };
 let state = null;
 let pollTimer = null;
-let editCount = 0;       // >0 while any due-date input or task-name field is being edited
+let activeEdits = new Set();   // tokens for every in-progress edit session —
+                                // a Set (not a plain counter) so a stale
+                                // endEdit() from an element that's already
+                                // been replaced in the DOM (e.g. by the
+                                // re-render that follows "create sibling
+                                // task") can never cancel out a *different*,
+                                // newer edit session that just began
+let editTokenSeq = 0;
 let pendingData = null;  // latest server snapshot received while an edit was in progress
 let renderSeq = 0;       // monotonically increasing; guards against a slow/stale
                           // response overwriting a result that arrived after it
+let focusNewTaskIn = null;     // {section, sub} — after the next render, focus
+                                // the last task's name field in this section/sub
+                                // (Enter-on-a-task-name creates a sibling task)
+let focusNewHeader = null;     // {type: 'section'|'sub', section, sub} — after
+                                // the next render, focus that header's name
+                                // field (Enter-on-a-header creates a sibling)
 
-function beginEdit() { editCount++; }
-function endEdit() {
-  editCount = Math.max(0, editCount - 1);
-  if (editCount === 0 && pendingData) {
+function beginEdit() {
+  const token = ++editTokenSeq;
+  activeEdits.add(token);
+  return token;
+}
+function endEdit(token) {
+  if (token !== undefined) {
+    activeEdits.delete(token);
+  } else {
+    // Back-compat for call sites that don't track a token: only safe to
+    // clear if there's exactly one active edit (otherwise leave the set
+    // alone rather than risk dropping someone else's session).
+    if (activeEdits.size <= 1) activeEdits.clear();
+  }
+  if (activeEdits.size === 0 && pendingData) {
     const data = pendingData;
     pendingData = null;
     render(data);
   }
+}
+
+function applyFreshState(data) {
+  // Use after any successful mutation: the response we just got is always
+  // at least as fresh as whatever a background poll may have stashed in
+  // pendingData while we were mid-edit, so it must win — otherwise ending
+  // the edit session (endEdit) would replay that stale snapshot and visibly
+  // revert the change the user just made and the server just saved.
+  pendingData = null;
+  render(data);
 }
 
 function showToast(msg, isErr) {
@@ -641,7 +717,7 @@ function renderTaskListArea(data) {
   if (sectionNames.length === 0) {
     const msg = activeTagFilter
       ? 'No tasks tagged #' + escapeHtml(activeTagFilter) + '.'
-      : 'No tasks yet &mdash; add your first one below.';
+      : 'No sections yet &mdash; use "+ Section" above, or add a task below to start one.';
     area.innerHTML = '<div class="empty-state"><span class="glyph">&#9633;</span>' + msg + '</div>';
     return;
   }
@@ -652,15 +728,76 @@ function renderTaskListArea(data) {
     let secDone = 0, secTotal = 0;
     for (const sub in subs) { for (const t of subs[sub]) { secTotal++; if (t.status === '[x]') secDone++; } }
 
-    html += '<div class="section-header"><span class="hash">#</span><span class="name">' + escapeHtml(sec) +
-            '</span><span class="progress">' + secDone + '/' + secTotal + '</span></div><hr class="section-rule">';
-    for (const sub in subs) {
-      html += '<div class="sub-header"><span class="hash">##</span><span class="name">' + escapeHtml(sub) + '</span></div>';
-      for (const t of subs[sub]) html += renderTaskRow(t);
+    html += '<div class="section-block" data-section="' + escapeHtml(sec) + '">';
+    html += '<div class="section-header">' +
+              '<span class="hash">#</span>' +
+              '<span class="name" contenteditable="true" spellcheck="false" data-header="section" data-section="' + escapeHtml(sec) + '">' + escapeHtml(sec) + '</span>' +
+              '<span class="progress">' + secDone + '/' + secTotal + '</span>' +
+              '<span class="add-inline-link add-sub-link" data-add-sub="' + escapeHtml(sec) + '">+ subsection</span>' +
+            '</div><hr class="section-rule">';
+
+    const subNames = Object.keys(subs);
+    if (subNames.length === 0) {
+      html += '<div class="empty-sub-placeholder">No subsections yet.</div>';
     }
+    for (const sub of subNames) {
+      html += '<div class="sub-block" data-section="' + escapeHtml(sec) + '" data-sub="' + escapeHtml(sub) + '">';
+      html += '<div class="sub-header">' +
+                '<span class="hash">##</span>' +
+                '<span class="name" contenteditable="true" spellcheck="false" data-header="sub" data-section="' + escapeHtml(sec) + '" data-sub="' + escapeHtml(sub) + '">' + escapeHtml(sub) + '</span>' +
+              '</div>';
+      for (const t of subs[sub]) html += renderTaskRow(t);
+      html += '<div class="add-task-row" data-add-task data-section="' + escapeHtml(sec) + '" data-sub="' + escapeHtml(sub) + '">+ task</div>';
+      html += '</div>';
+    }
+    html += '</div>';
   }
   area.innerHTML = html;
   attachRowHandlers();
+  attachHeaderHandlers();
+  attachAddLinkHandlers();
+  applyPendingFocus();
+}
+
+function applyPendingFocus() {
+  if (focusNewTaskIn) {
+    const { section, sub } = focusNewTaskIn;
+    focusNewTaskIn = null;
+    const subBlock = document.querySelector(
+      '.sub-block[data-section="' + cssEscape(section) + '"][data-sub="' + cssEscape(sub) + '"]'
+    );
+    if (subBlock) {
+      const rows = subBlock.querySelectorAll('.task-name');
+      const last = rows[rows.length - 1];
+      if (last) {
+        last.focus();
+        selectAllText(last);
+      }
+    }
+  }
+  if (focusNewHeader) {
+    const { type, section, sub } = focusNewHeader;
+    focusNewHeader = null;
+    let el = null;
+    if (type === 'section') {
+      el = document.querySelector('.section-header .name[data-section="' + cssEscape(section) + '"]');
+    } else {
+      el = document.querySelector('.sub-header .name[data-section="' + cssEscape(section) + '"][data-sub="' + cssEscape(sub) + '"]');
+    }
+    if (el) { el.focus(); selectAllText(el); }
+  }
+}
+
+function selectAllText(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function cssEscape(s) {
+  return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
 }
 
 function render(data) {
@@ -690,26 +827,72 @@ function attachRowHandlers() {
   });
 
   document.querySelectorAll('.task-name').forEach(el => {
-    el.addEventListener('focus', beginEdit);
-    el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); el.blur(); } });
+    let myToken = null;
+    el.addEventListener('focus', () => { myToken = beginEdit(); });
+
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        // blur() dispatches the 'blur' handler synchronously, so the flag
+        // it reads must be set *before* calling blur(), not after.
+        el.dataset.createSiblingOnBlur = '1';
+        el.blur();
+      } else if (e.key === 'Enter' && e.shiftKey) {
+        // Markdown task lines are single-line in storage (a literal newline
+        // would corrupt the file format), so Shift+Enter inserts a plain
+        // space rather than a real line break — it still reads as "continue
+        // on what feels like a new segment" without risking the file.
+        e.preventDefault();
+        document.execCommand('insertText', false, ' ');
+      }
+    });
+
     el.addEventListener('blur', async () => {
       const row = el.closest('.task-row');
       const id = row.dataset.id;
-      const value = el.textContent.trim();
-      if (!value) { el.textContent = '(unnamed)'; endEdit(); return; }
+      const value = el.textContent.replace(/\s+/g, ' ').trim();
+      const shouldCreateSibling = el.dataset.createSiblingOnBlur === '1';
+      delete el.dataset.createSiblingOnBlur;
+
+      if (!value) { el.textContent = '(unnamed)'; endEdit(myToken); return; }
       try {
         const data = await api('/api/tasks/' + id + '/field', 'POST', { field: 'name', value: value });
-        state = data;
-        showToast('Saved');
-      } catch (e) { showToast(e.message, true); }
-      endEdit();
+        if (shouldCreateSibling) {
+          state = data;  // sibling-creation branch below renders explicitly
+        } else {
+          pendingData = null;  // our result supersedes any stale poll snapshot
+          state = data;
+          showToast('Saved');
+        }
+      } catch (e) {
+        showToast(e.message, true);
+        endEdit(myToken);
+        return;
+      }
+
+      if (shouldCreateSibling) {
+        const task = (state.tasks || []).find(t => t.id === id);
+        const section = task ? task.section : 'Uncategorized';
+        const sub = task ? task.sub : 'General';
+        try {
+          const data = await api('/api/tasks', 'POST', { name: 'New task', section: section, sub: sub });
+          focusNewTaskIn = { section, sub };
+          // End *this* field's edit session before rendering, so the new
+          // field's own beginEdit() (triggered by applyPendingFocus' focus()
+          // call during render) isn't at risk of being torn down by it.
+          endEdit(myToken);
+          applyFreshState(data);
+          return;
+        } catch (e) { showToast(e.message, true); }
+      }
+      endEdit(myToken);
     });
   });
 
   document.querySelectorAll('.task-due').forEach(el => {
     el.addEventListener('click', () => {
       if (el.querySelector('input')) return;
-      beginEdit();
+      const myToken = beginEdit();
       const row = el.closest('.task-row');
       const id = row.dataset.id;
       const current = (state.tasks.find(t => t.id === id) || {}).due || '';
@@ -726,11 +909,12 @@ function attachRowHandlers() {
         const mySeq = ++renderSeq;
         try {
           const data = await api('/api/tasks/' + id + '/field', 'POST', { field: 'due', value: value || null });
-          endEdit();
+          pendingData = null;  // our result supersedes any stale poll snapshot
+          endEdit(myToken);
           renderIfCurrent(data, mySeq);
           showToast('Due date updated');
         } catch (e) {
-          endEdit();
+          endEdit(myToken);
           showToast(e.message, true);
           renderIfCurrent(state, mySeq);
         }
@@ -738,7 +922,7 @@ function attachRowHandlers() {
       const cancel = () => {
         if (settled) return;
         settled = true;
-        endEdit();
+        endEdit(myToken);
         render(state);
       };
       input.addEventListener('keydown', e => {
@@ -752,7 +936,7 @@ function attachRowHandlers() {
   document.querySelectorAll('.task-pri').forEach(el => {
     el.addEventListener('click', () => {
       if (el.querySelector('input')) return;
-      beginEdit();
+      const myToken = beginEdit();
       const row = el.closest('.task-row');
       const id = row.dataset.id;
       const current = (state.tasks.find(t => t.id === id) || {}).pri;
@@ -769,16 +953,17 @@ function attachRowHandlers() {
         const mySeq = ++renderSeq;
         try {
           const data = await api('/api/tasks/' + id + '/field', 'POST', { field: 'pri', value: raw === '' ? null : raw });
-          endEdit();
+          pendingData = null;  // our result supersedes any stale poll snapshot
+          endEdit(myToken);
           renderIfCurrent(data, mySeq);
           showToast('Priority updated');
         } catch (e) {
-          endEdit();
+          endEdit(myToken);
           showToast(e.message, true);
           renderIfCurrent(state, mySeq);
         }
       };
-      const cancel = () => { if (settled) return; settled = true; endEdit(); render(state); };
+      const cancel = () => { if (settled) return; settled = true; endEdit(myToken); render(state); };
       input.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); commit(); }
         if (e.key === 'Escape') { e.preventDefault(); cancel(); }
@@ -821,6 +1006,166 @@ function attachRowHandlers() {
       closeAllActionMenus();
       if (isOpen) return;
       openActionMenu(row);
+    });
+  });
+}
+
+function attachHeaderHandlers() {
+  // Section name editing: blur commits a rename; Enter creates a new
+  // sibling section; Shift+Enter inserts a space (no real newline, since
+  // markdown headers are single-line).
+  document.querySelectorAll('.section-header .name').forEach(el => {
+    let myToken = null;
+    el.addEventListener('focus', () => { myToken = beginEdit(); });
+
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        el.dataset.createSiblingOnBlur = '1';
+        el.blur();
+      } else if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        document.execCommand('insertText', false, ' ');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        el.textContent = el.dataset.section;
+        el.blur();
+      }
+    });
+
+    el.addEventListener('blur', async () => {
+      const oldName = el.dataset.section;
+      const newName = el.textContent.replace(/\s+/g, ' ').trim();
+      const createSibling = el.dataset.createSiblingOnBlur === '1';
+      delete el.dataset.createSiblingOnBlur;
+
+      if (!newName) { el.textContent = oldName; endEdit(myToken); return; }
+
+      if (newName !== oldName) {
+        try {
+          const data = await api('/api/sections/rename', 'POST', { old: oldName, new: newName });
+          pendingData = null;  // our result supersedes any stale poll snapshot
+          state = data;
+          if (!createSibling) showToast('Section renamed');
+        } catch (e) {
+          showToast(e.message, true);
+          el.textContent = oldName;
+          endEdit(myToken);
+          return;
+        }
+      }
+
+      if (createSibling) {
+        try {
+          const baseName = createSibling ? newName : oldName;
+          const newSectionName = nextUntitledName(state.sections, baseName, 'Section');
+          const data = await api('/api/sections', 'POST', { section: newSectionName });
+          focusNewHeader = { type: 'section', section: newSectionName };
+          endEdit(myToken);
+          applyFreshState(data);
+          return;
+        } catch (e) { showToast(e.message, true); }
+      }
+      endEdit(myToken);
+    });
+  });
+
+  // Subsection name editing: same pattern, scoped within its section.
+  document.querySelectorAll('.sub-header .name').forEach(el => {
+    let myToken = null;
+    el.addEventListener('focus', () => { myToken = beginEdit(); });
+
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        el.dataset.createSiblingOnBlur = '1';
+        el.blur();
+      } else if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        document.execCommand('insertText', false, ' ');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        el.textContent = el.dataset.sub;
+        el.blur();
+      }
+    });
+
+    el.addEventListener('blur', async () => {
+      const section = el.dataset.section;
+      const oldSub = el.dataset.sub;
+      const newSub = el.textContent.replace(/\s+/g, ' ').trim();
+      const createSibling = el.dataset.createSiblingOnBlur === '1';
+      delete el.dataset.createSiblingOnBlur;
+
+      if (!newSub) { el.textContent = oldSub; endEdit(myToken); return; }
+
+      if (newSub !== oldSub) {
+        try {
+          const data = await api('/api/sections/rename', 'POST', { section: section, old_sub: oldSub, new_sub: newSub });
+          pendingData = null;  // our result supersedes any stale poll snapshot
+          state = data;
+          if (!createSibling) showToast('Subsection renamed');
+        } catch (e) {
+          showToast(e.message, true);
+          el.textContent = oldSub;
+          endEdit(myToken);
+          return;
+        }
+      }
+
+      if (createSibling) {
+        try {
+          const existingSubs = Object.keys((state.sections[section]) || {});
+          const newSubName = nextUntitledNameFromList(existingSubs, 'Subsection');
+          const data = await api('/api/sections', 'POST', { section: section, sub: newSubName });
+          focusNewHeader = { type: 'sub', section: section, sub: newSubName };
+          endEdit(myToken);
+          applyFreshState(data);
+          return;
+        } catch (e) { showToast(e.message, true); }
+      }
+      endEdit(myToken);
+    });
+  });
+}
+
+function nextUntitledName(sectionsObj, _hint, kind) {
+  return nextUntitledNameFromList(Object.keys(sectionsObj || {}), kind);
+}
+
+function nextUntitledNameFromList(existingNames, kind) {
+  const base = 'New ' + kind;
+  if (!existingNames.includes(base)) return base;
+  let n = 2;
+  while (existingNames.includes(base + ' ' + n)) n++;
+  return base + ' ' + n;
+}
+
+function attachAddLinkHandlers() {
+  document.querySelectorAll('[data-add-sub]').forEach(link => {
+    link.addEventListener('click', async () => {
+      const section = link.dataset.addSub;
+      const existingSubs = Object.keys((state.sections[section]) || {});
+      const subName = nextUntitledNameFromList(existingSubs, 'Subsection');
+      const mySeq = ++renderSeq;
+      try {
+        const data = await api('/api/sections', 'POST', { section: section, sub: subName });
+        focusNewHeader = { type: 'sub', section: section, sub: subName };
+        renderIfCurrent(data, mySeq);
+      } catch (e) { showToast(e.message, true); }
+    });
+  });
+
+  document.querySelectorAll('[data-add-task]').forEach(link => {
+    link.addEventListener('click', async () => {
+      const section = link.dataset.section;
+      const sub = link.dataset.sub;
+      const mySeq = ++renderSeq;
+      try {
+        const data = await api('/api/tasks', 'POST', { name: 'New task', section: section, sub: sub });
+        focusNewTaskIn = { section, sub };
+        renderIfCurrent(data, mySeq);
+      } catch (e) { showToast(e.message, true); }
     });
   });
 }
@@ -953,7 +1298,31 @@ document.getElementById('add-form').addEventListener('submit', async (e) => {
   } catch (err) { showToast(err.message, true); }
 });
 
-// ── Toolbar: validate / archive / delete-done / clear-all ─────────────────
+// ── Toolbar: + Section / validate / archive / delete-done / clear-all ─────
+
+document.getElementById('btn-add-section').addEventListener('click', () => {
+  openModal({
+    title: 'New section',
+    bodyHtml:
+      '<div class="modal-row" style="flex-direction:column;"><label>Section name</label><input type="text" id="modal-section-name-input" placeholder="e.g. Personal"></div>' +
+      '<div class="modal-row" style="flex-direction:column;"><label>Subsection (optional)</label><input type="text" id="modal-section-sub-input" placeholder="e.g. Errands"></div>',
+    confirmLabel: 'Create',
+    onOpen: (box) => box.querySelector('#modal-section-name-input').focus(),
+    onConfirm: async (box) => {
+      const section = box.querySelector('#modal-section-name-input').value.trim();
+      const sub = box.querySelector('#modal-section-sub-input').value.trim();
+      if (!section) return false;
+      const data = await api('/api/sections', 'POST', { section: section, sub: sub || undefined });
+      if (data.created === false) {
+        showToast('That section already exists', true);
+        return false;
+      }
+      render(data);
+      showToast('Section created');
+      return true;
+    },
+  });
+});
 
 document.getElementById('btn-validate').addEventListener('click', async () => {
   try {
@@ -1075,7 +1444,7 @@ async function poll() {
   const mySeq = ++renderSeq;
   try {
     const data = await api('/api/state');
-    if (editCount > 0) {
+    if (activeEdits.size > 0) {
       // Don't yank the DOM out from under an active edit (open due-date
       // input, or a task-name field mid-edit) — stash the snapshot and
       // apply it once the edit commits or cancels.

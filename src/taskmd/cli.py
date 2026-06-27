@@ -188,11 +188,20 @@ HELP_TEXT = """\033[96m━━━━━━━━━━━━━━━━━━━
    tm dashboard cli --progress               Section progress bars only
    tm dashboard web   (or: --live)           Open the browser control panel — full feature
                                               parity with the CLI, not a reduced view:
+                                                - "+ Section" button, and "+ subsection" /
+                                                  "+ task" links on every section/sub
                                                 - add tasks (Enter = same quick-capture
                                                   grammar as "tm add", incl. #tag !pri
                                                   @due /section //sub)
+                                                - Enter on a task name creates the next
+                                                  task right below it, same section/sub
+                                                  (focus moves there automatically)
+                                                - Enter on a section/subsection name
+                                                  creates a new one at the same level;
+                                                  Shift+Enter inserts a space instead
                                                 - click checkbox to cycle status
-                                                - edit name, due, priority, tags inline
+                                                - edit name, due, priority, tags inline;
+                                                  click a section/sub name to rename it
                                                 - move a task to another section/sub
                                                 - delete a single task
                                                 - bulk: delete all done, archive done,

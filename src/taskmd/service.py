@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from pathlib import Path
 
-from taskmd.models import Task, TaskDocument
+from taskmd.models import Task, TaskDocument, RawLine
 from taskmd.repository import TaskRepository
 from taskmd.exceptions import TaskNotFoundError, ValidationError
 from taskmd.datetime_utils import parse_task_date, parse_task_datetime, has_time_component
@@ -423,6 +423,178 @@ class TaskService:
 
         task.updated = self._now_iso()
         self.repo.save(doc)
+
+    def rename_section(self, old_name: str, new_name: str) -> bool:
+        """Rename a section: updates the header line and every task that
+        belongs to it. Returns False (no-op) if old_name doesn't exist or
+        new_name is unchanged/empty."""
+        old_name = (old_name or "").strip()
+        new_name = (new_name or "").strip()
+        if not old_name or not new_name or old_name == new_name:
+            return False
+
+        doc = self.repo.load()
+        if not self._section_exists(doc, old_name):
+            return False
+        if self._section_exists(doc, new_name):
+            raise ValidationError([f"A section named '{new_name}' already exists"])
+
+        for raw in doc.raw_lines:
+            if raw.line_type == "section" and raw.content.strip().lstrip("#").strip() == old_name:
+                raw.content = f"# {new_name}"
+        for task in doc.tasks:
+            if task.section == old_name:
+                task.section = new_name
+
+        self.repo.save(doc)
+        return True
+
+    def rename_subsection(self, section: str, old_sub: str, new_sub: str) -> bool:
+        """Rename a subsection within `section`. Returns False (no-op) if
+        old_sub doesn't exist under that section, or new_sub is
+        unchanged/empty."""
+        section = (section or "").strip()
+        old_sub = (old_sub or "").strip()
+        new_sub = (new_sub or "").strip()
+        if not section or not old_sub or not new_sub or old_sub == new_sub:
+            return False
+
+        doc = self.repo.load()
+        if not self._subsection_exists(doc, section, old_sub):
+            return False
+        if self._subsection_exists(doc, section, new_sub):
+            raise ValidationError([f"'{section}' already has a subsection named '{new_sub}'"])
+
+        in_section = False
+        for raw in doc.raw_lines:
+            if raw.line_type == "section":
+                in_section = raw.content.strip().lstrip("#").strip() == section
+                continue
+            if in_section and raw.line_type == "subsection" and raw.content.strip().lstrip("#").strip() == old_sub:
+                raw.content = f"## {new_sub}"
+        for task in doc.tasks:
+            if task.section == section and task.sub == old_sub:
+                task.sub = new_sub
+
+        self.repo.save(doc)
+        return True
+
+    def get_all_sections(self) -> "Dict[str, List[str]]":
+        """Return every section and its subsections, in document order,
+        including ones with zero tasks (e.g. just created via add_section /
+        add_subsection, or simply never populated yet).
+
+        Returns an ordered dict: {section_name: [sub1, sub2, ...]}.
+        Used by the web panel so a freshly-created empty section/subsection
+        is visible immediately, not just once a task is added to it.
+        """
+        doc = self.repo.load()
+        result: "Dict[str, List[str]]" = {}
+        current_section = None
+        for raw in doc.raw_lines:
+            if raw.line_type == "section":
+                current_section = raw.content.strip().lstrip("#").strip()
+                result.setdefault(current_section, [])
+            elif raw.line_type == "subsection" and current_section is not None:
+                sub_name = raw.content.strip().lstrip("#").strip()
+                if sub_name not in result[current_section]:
+                    result[current_section].append(sub_name)
+        return result
+
+    def add_section(self, section: str) -> bool:
+        """Create a new, empty top-level section (TODOs.md follow-up to Issue 4:
+        the panel's "+ Section" button and "Enter on a section header creates
+        a new section" behavior).
+
+        Returns True if a new section was created, False if it already existed
+        (a no-op rather than an error, since "add section" on something that's
+        already there is harmless).
+        """
+        section = (section or "").strip()
+        if not section:
+            raise ValidationError(["Section name cannot be empty"])
+
+        doc = self.repo.load()
+        if self._section_exists(doc, section):
+            return False
+
+        if doc.raw_lines and doc.raw_lines[-1].content.strip():
+            doc.raw_lines.append(RawLine(content="", line_number=len(doc.raw_lines), line_type="blank"))
+        doc.raw_lines.append(RawLine(content=f"# {section}", line_number=len(doc.raw_lines), line_type="section"))
+        self.repo.save(doc)
+        return True
+
+    def add_subsection(self, section: str, sub: str) -> bool:
+        """Create a new, empty subsection under `section` (creating the
+        section itself first if it doesn't exist yet).
+
+        Returns True if a new subsection was created, False if it already
+        existed.
+        """
+        section = (section or "").strip()
+        sub = (sub or "").strip()
+        if not section or not sub:
+            raise ValidationError(["Section and subsection names cannot be empty"])
+
+        doc = self.repo.load()
+        if self._subsection_exists(doc, section, sub):
+            return False
+
+        if not self._section_exists(doc, section):
+            if doc.raw_lines and doc.raw_lines[-1].content.strip():
+                doc.raw_lines.append(RawLine(content="", line_number=len(doc.raw_lines), line_type="blank"))
+            doc.raw_lines.append(RawLine(content=f"# {section}", line_number=len(doc.raw_lines), line_type="section"))
+            doc.raw_lines.append(RawLine(content=f"## {sub}", line_number=len(doc.raw_lines), line_type="subsection"))
+        else:
+            insert_at = self._section_block_end(doc, section)
+            doc.raw_lines.insert(insert_at, RawLine(content=f"## {sub}", line_number=insert_at, line_type="subsection"))
+
+        self.repo.save(doc)
+        return True
+
+    @staticmethod
+    def _section_exists(doc: TaskDocument, section: str) -> bool:
+        for raw in doc.raw_lines:
+            if raw.line_type == "section" and raw.content.strip().lstrip("#").strip() == section:
+                return True
+        return False
+
+    @staticmethod
+    def _subsection_exists(doc: TaskDocument, section: str, sub: str) -> bool:
+        in_section = False
+        for raw in doc.raw_lines:
+            if raw.line_type == "section":
+                in_section = raw.content.strip().lstrip("#").strip() == section
+                continue
+            if in_section and raw.line_type == "subsection":
+                if raw.content.strip().lstrip("#").strip() == sub:
+                    return True
+        return False
+
+    @staticmethod
+    def _section_block_end(doc: TaskDocument, section: str) -> int:
+        """Return the raw_lines index to insert at for "end of `section`'s
+        block" — right after the section's last non-blank line, skipping
+        back over any trailing blank lines so a new subsection doesn't end
+        up sitting after the blank-line separator that visually belongs to
+        the *next* section."""
+        in_section = False
+        block_end = len(doc.raw_lines)
+        last_content_idx = None
+        for i, raw in enumerate(doc.raw_lines):
+            if raw.line_type == "section":
+                if in_section:
+                    block_end = i
+                    break
+                in_section = raw.content.strip().lstrip("#").strip() == section
+                if in_section:
+                    last_content_idx = i
+                continue
+            if in_section and raw.line_type != "blank":
+                last_content_idx = i
+        if last_content_idx is not None:
+            return last_content_idx + 1
+        return block_end
 
     def move_task(self, task_id: str, section: str = None, sub: str = None):
         """Move a task to a different section/subsection."""

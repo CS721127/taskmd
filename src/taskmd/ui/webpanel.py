@@ -63,7 +63,13 @@ def _build_payload(service) -> dict:
     tasks = service.get_all_tasks()
     stats = service.get_stats()
 
+    # Seed every section/subsection that exists in the document — including
+    # ones with zero tasks — so a freshly created empty section/subsection
+    # is visible right away rather than only appearing once it has a task.
     sections: "dict[str, dict[str, list]]" = {}
+    for sec, subs in service.get_all_sections().items():
+        sections[sec] = {sub: [] for sub in subs}
+
     for t in tasks:
         sec = t.section or "Uncategorized"
         sub = t.sub or "General"
@@ -250,6 +256,51 @@ def make_handler(service, html_content: str):
                         return
                     service.move_task(task_id, section=section, sub=sub)
                     self._send_json(_build_payload(service))
+                    return
+
+                # /api/sections  → create a new, empty top-level section
+                # (the panel's "+ Section" button, and Enter on a section
+                # header). Body: {"section": "Name"} or, if a subsection
+                # name is also given, {"section": "Name", "sub": "Sub"}
+                # creates both in one call.
+                if parsed.path == "/api/sections":
+                    section = (body.get("section") or "").strip()
+                    sub = (body.get("sub") or "").strip() or None
+                    if not section:
+                        self._send_json({"error": "section name is required"}, status=400)
+                        return
+                    if sub:
+                        created = service.add_subsection(section, sub)
+                    else:
+                        created = service.add_section(section)
+                    payload = _build_payload(service)
+                    payload["created"] = created
+                    self._send_json(payload)
+                    return
+
+                # /api/sections/rename  → rename a section (and, optionally
+                # in the same call, scope it to renaming one subsection
+                # within it instead). Body: {"old": "Work", "new": "Career"}
+                # or {"section": "Work", "old_sub": "Reports", "new_sub": "Docs"}
+                if parsed.path == "/api/sections/rename":
+                    if "old_sub" in body or "new_sub" in body:
+                        section = (body.get("section") or "").strip()
+                        old_sub = (body.get("old_sub") or "").strip()
+                        new_sub = (body.get("new_sub") or "").strip()
+                        if not section or not old_sub or not new_sub:
+                            self._send_json({"error": "section, old_sub, and new_sub are required"}, status=400)
+                            return
+                        renamed = service.rename_subsection(section, old_sub, new_sub)
+                    else:
+                        old_name = (body.get("old") or "").strip()
+                        new_name = (body.get("new") or "").strip()
+                        if not old_name or not new_name:
+                            self._send_json({"error": "old and new names are required"}, status=400)
+                            return
+                        renamed = service.rename_section(old_name, new_name)
+                    payload = _build_payload(service)
+                    payload["renamed"] = renamed
+                    self._send_json(payload)
                     return
 
                 # ── Bulk operations (toolbar actions) ──────────────────────
