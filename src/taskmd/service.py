@@ -293,6 +293,88 @@ class TaskService:
 
     # ─── Write Operations ────────────────────────────────────────────────
 
+    def add_task_after(
+        self,
+        after_task_id: str,
+        name: str,
+        due: Optional[str] = None,
+        start: Optional[str] = None,
+        pri: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        rem: Optional[str] = None,
+        course: Optional[str] = None,
+        recur: Optional[str] = None,
+        weight: Optional[int] = None,
+    ) -> Task:
+        """Add a new task immediately following `after_task_id`'s line,
+        inheriting its section/subsection — used by the web panel's
+        "Enter on a task name creates the next task right below it" behavior,
+        so the new task lands exactly where the user is looking rather than
+        at the end of the (possibly much longer) section.
+
+        Raises TaskNotFoundError if after_task_id doesn't exist.
+        """
+        doc = self.repo.load()
+        self._repair_ids(doc)
+
+        anchor = self._find_task(doc, after_task_id)
+        if not anchor:
+            raise TaskNotFoundError(after_task_id)
+        if anchor._source_line is None:
+            # Anchor is itself a pending "new" task that hasn't been written
+            # to a concrete line yet (shouldn't normally happen via the API,
+            # but fall back to a plain append rather than erroring out).
+            return self.add_task(
+                name=name, section=anchor.section, sub=anchor.sub, due=due, start=start,
+                pri=pri, tags=tags, rem=rem, course=course, recur=recur, weight=weight,
+            )
+
+        max_id = self._get_max_id(doc)
+        new_id = f"t_{max_id + 1:02d}"
+
+        new_task = Task(
+            name=name,
+            section=anchor.section,
+            sub=anchor.sub,
+            id=new_id,
+            due=due,
+            start=start,
+            pri=pri,
+            tags=tags,
+            rem=rem,
+            course=course,
+            recur=recur,
+            weight=weight,
+            created=self._now_iso(),
+        )
+
+        # raw.line_number is 1-indexed (set via enumerate(lines, start=1) in
+        # the parser), while doc.raw_lines is a normal 0-indexed Python list
+        # — so the anchor's *list position* is line_number - 1, not
+        # line_number itself. Getting this wrong silently corrupts the file
+        # (confirmed by a regression test — see test_sections.py).
+        anchor_list_idx = anchor._source_line - 1
+        insert_list_idx = anchor_list_idx + 1
+        new_line_number = insert_list_idx + 1  # back to 1-indexed for the new raw line
+
+        new_raw = RawLine(content="", line_number=new_line_number, line_type="task")
+        doc.raw_lines.insert(insert_list_idx, new_raw)
+
+        # Renumber every subsequent raw_line's line_number (+1, to stay
+        # 1-indexed and consistent with its new list position), and shift
+        # every task's _source_line that pointed at or after the insertion
+        # point by the same +1.
+        for i in range(insert_list_idx, len(doc.raw_lines)):
+            doc.raw_lines[i].line_number = i + 1
+        for t in doc.tasks:
+            if t._source_line is not None and t._source_line >= new_line_number:
+                t._source_line += 1
+        new_task._source_line = new_line_number
+
+        doc.tasks.append(new_task)
+        self.repo.save(doc)
+        return new_task
+
     def add_task(
         self,
         name: str,

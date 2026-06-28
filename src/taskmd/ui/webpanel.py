@@ -196,18 +196,35 @@ def make_handler(service, html_content: str):
                     explicit_tags = body.get("tags")
                     tags = explicit_tags if explicit_tags else (cap.tags or None)
 
-                    service.add_task(
-                        name=cap.name if cap.name else raw_name,
-                        section=body.get("section") or cap.section or "Uncategorized",
-                        sub=body.get("sub") or cap.sub or "General",
-                        due=body.get("due") or cap.due or None,
-                        start=body.get("start") or cap.start or None,
-                        pri=body.get("pri") if body.get("pri") is not None else cap.pri,
-                        tags=tags,
-                        rem=body.get("rem") or cap.rem or None,
-                    )
+                    after_id = body.get("after")
+                    if after_id:
+                        # Insert immediately following a specific existing
+                        # task (used by "Enter on a task name creates the
+                        # next task right below it") rather than appending
+                        # to the end of the section/subsection.
+                        new_task = service.add_task_after(
+                            after_task_id=after_id,
+                            name=cap.name if cap.name else raw_name,
+                            due=body.get("due") or cap.due or None,
+                            start=body.get("start") or cap.start or None,
+                            pri=body.get("pri") if body.get("pri") is not None else cap.pri,
+                            tags=tags,
+                            rem=body.get("rem") or cap.rem or None,
+                        )
+                    else:
+                        new_task = service.add_task(
+                            name=cap.name if cap.name else raw_name,
+                            section=body.get("section") or cap.section or "Uncategorized",
+                            sub=body.get("sub") or cap.sub or "General",
+                            due=body.get("due") or cap.due or None,
+                            start=body.get("start") or cap.start or None,
+                            pri=body.get("pri") if body.get("pri") is not None else cap.pri,
+                            tags=tags,
+                            rem=body.get("rem") or cap.rem or None,
+                        )
                     payload = _build_payload(service)
                     payload["capture_warnings"] = cap.warnings
+                    payload["new_task_id"] = new_task.id
                     self._send_json(payload)
                     return
 

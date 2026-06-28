@@ -571,12 +571,22 @@ let editTokenSeq = 0;
 let pendingData = null;  // latest server snapshot received while an edit was in progress
 let renderSeq = 0;       // monotonically increasing; guards against a slow/stale
                           // response overwriting a result that arrived after it
-let focusNewTaskIn = null;     // {section, sub} — after the next render, focus
-                                // the last task's name field in this section/sub
-                                // (Enter-on-a-task-name creates a sibling task)
+let focusNewTaskId = null;     // task id — after the next render, focus
+                                // that exact task's name field (Enter-on-a-
+                                // task-name creates a sibling task right
+                                // below it; ID-based targeting is required
+                                // since the new task is inserted in place,
+                                // not necessarily at the end of its sub)
 let focusNewHeader = null;     // {type: 'section'|'sub', section, sub} — after
                                 // the next render, focus that header's name
                                 // field (Enter-on-a-header creates a sibling)
+let lastRenderedSignature = null;  // JSON snapshot of the last data actually
+                                    // painted to the DOM — lets poll() detect
+                                    // "nothing changed" and skip the rebuild
+                                    // entirely, instead of destroying and
+                                    // recreating every row on a fixed timer
+                                    // even when nothing changed (the visible
+                                    // "flashing" this is fixing).
 
 function beginEdit() {
   const token = ++editTokenSeq;
@@ -760,32 +770,57 @@ function renderTaskListArea(data) {
 }
 
 function applyPendingFocus() {
-  if (focusNewTaskIn) {
-    const { section, sub } = focusNewTaskIn;
-    focusNewTaskIn = null;
-    const subBlock = document.querySelector(
-      '.sub-block[data-section="' + cssEscape(section) + '"][data-sub="' + cssEscape(sub) + '"]'
-    );
-    if (subBlock) {
-      const rows = subBlock.querySelectorAll('.task-name');
-      const last = rows[rows.length - 1];
-      if (last) {
-        last.focus();
-        selectAllText(last);
+  if (focusNewTaskId) {
+    const id = focusNewTaskId;
+    focusNewTaskId = null;
+    focusElementWhenReady(
+      () => {
+        const row = document.querySelector('.task-row[data-id="' + cssEscape(id) + '"]');
+        return row ? row.querySelector('.task-name') : null;
       }
-    }
+    );
   }
   if (focusNewHeader) {
     const { type, section, sub } = focusNewHeader;
     focusNewHeader = null;
-    let el = null;
-    if (type === 'section') {
-      el = document.querySelector('.section-header .name[data-section="' + cssEscape(section) + '"]');
-    } else {
-      el = document.querySelector('.sub-header .name[data-section="' + cssEscape(section) + '"][data-sub="' + cssEscape(sub) + '"]');
-    }
-    if (el) { el.focus(); selectAllText(el); }
+    focusElementWhenReady(() => {
+      if (type === 'section') {
+        return document.querySelector('.section-header .name[data-section="' + cssEscape(section) + '"]');
+      }
+      return document.querySelector('.sub-header .name[data-section="' + cssEscape(section) + '"][data-sub="' + cssEscape(sub) + '"]');
+    });
   }
+}
+
+function focusElementWhenReady(findEl, attemptsLeft, placeholderToken) {
+  // Focusing an element immediately after an innerHTML rebuild can
+  // occasionally be a no-op if the browser hasn't finished layout for the
+  // newly inserted node yet. Deferring one animation frame (and retrying a
+  // couple of times if the node isn't there yet either) makes this
+  // reliable instead of intermittently silently failing.
+  if (attemptsLeft === undefined) attemptsLeft = 3;
+  if (placeholderToken === undefined) {
+    // Hold a placeholder edit-session token across the deferral gap so a
+    // poll landing in that single frame can't see activeEdits as empty
+    // and render destructively right before the focus actually lands.
+    placeholderToken = beginEdit();
+  }
+  requestAnimationFrame(() => {
+    const el = findEl();
+    if (el) {
+      // el already has its own 'focus' listener attached (from
+      // attachRowHandlers/attachHeaderHandlers) that calls beginEdit() and
+      // captures the token its own blur handler needs — calling .focus()
+      // here triggers that listener naturally, so nothing extra is needed.
+      el.focus();
+      selectAllText(el);
+      endEdit(placeholderToken);
+    } else if (attemptsLeft > 0) {
+      focusElementWhenReady(findEl, attemptsLeft - 1, placeholderToken);
+    } else {
+      endEdit(placeholderToken);
+    }
+  });
 }
 
 function selectAllText(el) {
@@ -802,6 +837,7 @@ function cssEscape(s) {
 
 function render(data) {
   state = data;
+  lastRenderedSignature = JSON.stringify(data);
   renderStats(data.stats);
   renderTagChipBar(data.tags);
   renderTaskListArea(data);
@@ -871,12 +907,9 @@ function attachRowHandlers() {
       }
 
       if (shouldCreateSibling) {
-        const task = (state.tasks || []).find(t => t.id === id);
-        const section = task ? task.section : 'Uncategorized';
-        const sub = task ? task.sub : 'General';
         try {
-          const data = await api('/api/tasks', 'POST', { name: 'New task', section: section, sub: sub });
-          focusNewTaskIn = { section, sub };
+          const data = await api('/api/tasks', 'POST', { name: 'New task', after: id });
+          focusNewTaskId = data.new_task_id;
           // End *this* field's edit session before rendering, so the new
           // field's own beginEdit() (triggered by applyPendingFocus' focus()
           // call during render) isn't at risk of being torn down by it.
@@ -1163,7 +1196,7 @@ function attachAddLinkHandlers() {
       const mySeq = ++renderSeq;
       try {
         const data = await api('/api/tasks', 'POST', { name: 'New task', section: section, sub: sub });
-        focusNewTaskIn = { section, sub };
+        focusNewTaskId = data.new_task_id;
         renderIfCurrent(data, mySeq);
       } catch (e) { showToast(e.message, true); }
     });
@@ -1451,7 +1484,16 @@ async function poll() {
       pendingData = data;
       document.getElementById('last-sync').textContent = 'synced ' + new Date().toLocaleTimeString() + ' (editing\u2026)';
     } else {
-      renderIfCurrent(data, mySeq);
+      const signature = JSON.stringify(data);
+      if (signature === lastRenderedSignature) {
+        // Nothing actually changed since the last paint — touching the DOM
+        // anyway (even to set identical content) resets hover/transition
+        // state on every row and reads as a visible "flash" every poll
+        // cycle. Just confirm we're still in sync, without rebuilding.
+        document.getElementById('last-sync').textContent = 'synced ' + new Date().toLocaleTimeString();
+      } else {
+        renderIfCurrent(data, mySeq);
+      }
     }
   } catch (e) {
     document.getElementById('last-sync').textContent = 'connection lost \u2014 retrying\u2026';
