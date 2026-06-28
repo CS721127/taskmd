@@ -21,6 +21,8 @@
 ## 第二部分：Phase 9-15 补全 (Feature Completion)
 ## Phase +1 鼓励机制动画
 - 制作一个鼓励机制，可以自己设置与打开，当设置后当完成到一定百分比有烟花等等界面特效恭喜再接再厉
+## Phase +1 Progress bar (project bar)
+- 当用户有相应project planning需求的时候，可以设置project的几个stage，每一个stage有什么任务，何时完成等等一系列；以及可以设置提醒，导出特定project的，review 任务进度，参与度，note等等；并且可以调整基于现实情况
 ## Phase 9：主题与审美完成度（Themes & Aesthetic Polish）
 
 ### 目标
