@@ -133,7 +133,138 @@ class TestAddSubsection:
         assert any(t.name == "Standup" and t.sub == "Meetings" for t in tasks)
 
 
-class TestGetAllSections:
+class TestAddTaskAfter:
+    """Covers TaskService.add_task_after — inserts a new task immediately
+    following a specific existing task, used by the web panel's "Enter on
+    a task name creates the next task right below it, not at the end of
+    the section" behavior."""
+
+    def test_inserts_directly_after_anchor_in_middle_of_section(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n"
+            "- [ ] Write report <!-- id:t_01 -->\n"
+            "- [ ] Submit invoice <!-- id:t_02 -->\n"
+            "- [ ] Prepare slides <!-- id:t_03 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        new_task = service.add_task_after("t_02", "Inserted task")
+
+        content = f.read_text(encoding="utf-8")
+        lines = [l for l in content.splitlines() if l.startswith("- [")]
+        names_in_order = [l.split("] ")[1].split(" <!--")[0] for l in lines]
+        assert names_in_order == ["Write report", "Submit invoice", "Inserted task", "Prepare slides"]
+        assert new_task.section == "Work"
+        assert new_task.sub == "Reports"
+
+    def test_inserts_after_first_task(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n"
+            "- [ ] Task A <!-- id:t_01 -->\n- [ ] Task B <!-- id:t_02 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        service.add_task_after("t_01", "Inserted")
+        content = f.read_text(encoding="utf-8")
+        lines = [l for l in content.splitlines() if l.startswith("- [")]
+        assert "Task A" in lines[0]
+        assert "Inserted" in lines[1]
+        assert "Task B" in lines[2]
+
+    def test_inserts_after_last_task_stays_within_section(self, tmp_path):
+        """Regression guard: inserting after the last task in a section must
+        not leak into the next section's block."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n"
+            "- [ ] Task A <!-- id:t_01 -->\n\n# Life\n## Errands\n"
+            "- [ ] Buy milk <!-- id:t_02 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        new_task = service.add_task_after("t_01", "Inserted")
+        assert new_task.section == "Work"
+        assert new_task.sub == "Reports"
+
+        tasks = service.get_all_tasks()
+        by_id = {t.id: t for t in tasks}
+        assert by_id["t_02"].section == "Life"  # unaffected
+
+    def test_chained_inserts_preserve_order(self, tmp_path):
+        """Simulates repeated Enter presses: insert after the task just
+        created, three times in a row."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n- [ ] Task A <!-- id:t_01 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        t2 = service.add_task_after("t_01", "Task B")
+        t3 = service.add_task_after(t2.id, "Task C")
+        service.add_task_after(t3.id, "Task D")
+
+        content = f.read_text(encoding="utf-8")
+        lines = [l for l in content.splitlines() if l.startswith("- [")]
+        names_in_order = [l.split("] ")[1].split(" <!--")[0] for l in lines]
+        assert names_in_order == ["Task A", "Task B", "Task C", "Task D"]
+
+    def test_raises_for_unknown_anchor(self, tmp_path):
+        from taskmd.exceptions import TaskNotFoundError
+        f = tmp_path / "tasks.md"
+        f.write_text("<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n- [ ] Task A <!-- id:t_01 -->\n", encoding="utf-8")
+        service = TaskService(TaskRepository(f))
+        with pytest.raises(TaskNotFoundError):
+            service.add_task_after("t_99", "X")
+
+    def test_inherits_section_and_sub_from_anchor_not_caller(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Personal\n## Shopping\n- [ ] Buy milk <!-- id:t_01 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        new_task = service.add_task_after("t_01", "Buy eggs")
+        assert new_task.section == "Personal"
+        assert new_task.sub == "Shopping"
+
+    def test_new_task_gets_a_fresh_unique_id(self, tmp_path):
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n"
+            "- [ ] Task A <!-- id:t_01 -->\n- [ ] Task B <!-- id:t_05 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        new_task = service.add_task_after("t_01", "Inserted")
+        all_ids = [t.id for t in service.get_all_tasks()]
+        assert len(all_ids) == len(set(all_ids))  # all unique
+        assert new_task.id not in ("t_01", "t_05")
+
+    def test_inserted_task_is_independently_editable_afterward(self, tmp_path):
+        """End-to-end sanity: after insertion, normal operations (status
+        change, metadata edit) on the new task must work correctly and not
+        accidentally affect its neighbors."""
+        f = tmp_path / "tasks.md"
+        f.write_text(
+            "<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n"
+            "- [ ] Task A <!-- id:t_01 -->\n- [ ] Task B <!-- id:t_02 -->\n",
+            encoding="utf-8",
+        )
+        service = TaskService(TaskRepository(f))
+        new_task = service.add_task_after("t_01", "Inserted")
+        service.change_status(new_task.id, "[x]")
+        service.set_metadata(new_task.id, "pri", "3")
+
+        tasks = {t.id: t for t in service.get_all_tasks()}
+        assert tasks[new_task.id].status == "[x]"
+        assert tasks[new_task.id].pri == 3
+        assert tasks["t_01"].status == "[ ]"
+        assert tasks["t_02"].status == "[ ]"
+
+
+
     def test_includes_sections_with_tasks(self, tmp_path):
         f = tmp_path / "tasks.md"
         f.write_text("<!-- taskmd:version=2 -->\n\n# Work\n## Reports\n- [ ] Task <!-- id:t_01 -->\n", encoding="utf-8")

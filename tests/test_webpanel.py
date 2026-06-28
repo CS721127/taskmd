@@ -347,6 +347,61 @@ class TestPanelAddWithQuickCapture:
         assert t["pri"] == 2
 
 
+class TestPanelInsertAfter:
+    """Covers the 'after' parameter on POST /api/tasks — used by the
+    "Enter on a task name creates the next task right below it" behavior so
+    the new task lands in place, not appended to the end of the section."""
+
+    def test_response_includes_new_task_id(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Plain task"})
+        assert status == 200
+        assert "new_task_id" in data
+        new_id = data["new_task_id"]
+        assert any(t["id"] == new_id and t["name"] == "Plain task" for t in data["tasks"])
+
+    def test_after_inserts_directly_following_anchor(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Inserted", "after": "t_01"})
+        assert status == 200
+        ids_in_order = [t["id"] for t in data["tasks"]]
+        idx_anchor = ids_in_order.index("t_01")
+        idx_new = ids_in_order.index(data["new_task_id"])
+        assert idx_new == idx_anchor + 1
+
+    def test_after_inherits_anchor_section_and_sub(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Inserted", "after": "t_01"})
+        new_task = next(t for t in data["tasks"] if t["id"] == data["new_task_id"])
+        anchor = next(t for t in data["tasks"] if t["id"] == "t_01")
+        assert new_task["section"] == anchor["section"]
+        assert new_task["sub"] == anchor["sub"]
+
+    def test_after_with_unknown_anchor_returns_404(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Inserted", "after": "t_99"})
+        assert status == 404
+
+    def test_after_still_supports_quick_capture_tokens(self, panel_server):
+        status, data = http_json(
+            panel_server + "api/tasks",
+            {"name": "Follow up #urgent !4", "after": "t_01"},
+        )
+        new_task = next(t for t in data["tasks"] if t["id"] == data["new_task_id"])
+        assert new_task["name"] == "Follow up"
+        assert "urgent" in new_task["tags"]
+        assert new_task["pri"] == 4
+
+    def test_after_persists_correct_order_to_file(self, panel_service, panel_server):
+        http_json(panel_server + "api/tasks", {"name": "Inserted", "after": "t_01"})
+        content = panel_service.repo.file_path.read_text(encoding="utf-8")
+        lines = [l for l in content.splitlines() if l.startswith("- [")]
+        names = [l.split("] ")[1].split(" <!--")[0] for l in lines]
+        idx_anchor = names.index("Write report")
+        assert names[idx_anchor + 1] == "Inserted"
+
+    def test_omitting_after_still_appends_to_end_as_before(self, panel_server):
+        status, data = http_json(panel_server + "api/tasks", {"name": "Appended", "section": "Work", "sub": "Reports"})
+        ids_in_order = [t["id"] for t in data["tasks"] if t["section"] == "Work" and t["sub"] == "Reports"]
+        assert ids_in_order[-1] == data["new_task_id"]
+
+
 class TestPanelTagOperations:
     def test_add_tag(self, panel_server):
         status, data = http_json(panel_server + "api/tasks/t_04/tags", {"action": "add", "tag": "urgent"})
@@ -504,3 +559,26 @@ class TestPanelPayloadIncludesTags:
         payload = _build_payload(panel_service)
         assert "tags" in payload
         assert payload["tags"].get("work") == 1
+
+
+class TestPanelPayloadDeterminism:
+    """The browser's poll loop skips re-rendering when the new payload's
+    JSON is identical to the last one it painted (fixing a bug where the
+    UI visibly flashed every 1.5s even with no changes). That only works
+    if _build_payload is itself deterministic for an unchanged file —
+    this guards that contract."""
+
+    def test_payload_is_byte_identical_across_repeated_calls_with_no_changes(self, panel_service):
+        import json
+        first = json.dumps(_build_payload(panel_service))
+        second = json.dumps(_build_payload(panel_service))
+        third = json.dumps(_build_payload(panel_service))
+        assert first == second == third
+
+    def test_payload_changes_after_a_real_mutation(self, panel_service):
+        import json
+        before = json.dumps(_build_payload(panel_service))
+        panel_service.add_task(name="Something new", section="Work", sub="Reports")
+        after = json.dumps(_build_payload(panel_service))
+        assert before != after
+
